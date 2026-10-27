@@ -156,7 +156,8 @@ afterAll(() => {
   for (const [k, v] of saved) g[k] = v;
 });
 
-const ALFRED_SELECTOR = '[data-alfred-theme-list], [data-alfred-theme-checkbox], [data-alfred-bulk-toolbar]';
+const ALFRED_SELECTOR =
+  '[data-alfred-theme-list], [data-alfred-theme-checkbox], [data-alfred-bulk-toolbar], [data-alfred-select-all]';
 const injected = () => [...document.querySelectorAll('[data-alfred-theme-list]')];
 const checkboxes = () => [...document.querySelectorAll<HTMLElement>('[data-alfred-theme-checkbox]')];
 // The real toggle state lives on the <input> inside the checkbox's shadow root, same as production.
@@ -245,6 +246,16 @@ describe('injectIntoThemeList', () => {
     ]);
   });
 
+  it('puts Select all right after the theme library heading, shown with nothing selected', () => {
+    injectIntoThemeList();
+
+    const selectAll = document.querySelector('[data-alfred-select-all]')!;
+    expect(selectAll.previousElementSibling?.tagName).toBe('S-INTERNAL-HEADING');
+    expect(selectAll.textContent).toBe('Select all');
+    expect(selectAll.hasAttribute('disabled')).toBe(false);
+    expect(toolbar()?.contains(selectAll)).toBe(false);
+  });
+
   it('finds the header by its New button when the group label is translated', () => {
     const group = document.querySelector('[role="group"]')!;
     group.setAttribute('aria-label', 'Acciones de tema');
@@ -285,7 +296,11 @@ describe('bulk delete', () => {
   const checkboxOf = (name: string) => card(name)!.querySelector<HTMLElement>('[data-alfred-theme-checkbox]')!;
   const checkedNames = () => NAMES.filter((name) => shown(name) && shownChecked(checkboxOf(name)));
   const remaining = () => NAMES.filter(shown);
-  const button = (action: string) => toolbar()!.querySelector<HTMLElement>(`[data-action="${action}"]`)!;
+  // "Select all" sits by the heading; the other buttons are in the toolbar.
+  const button = (action: string) =>
+    document.querySelector<HTMLElement>(
+      `[data-alfred-select-all][data-action="${action}"], [data-alfred-bulk-toolbar] [data-action="${action}"]`
+    )!;
   const click = (el: Element) => el.dispatchEvent(new dom.Event('click', { bubbles: true }));
   // The delete button carries the count, and progress while a delete runs.
   const countText = () => toolbar()?.querySelector('[data-action="delete"]')?.textContent;
@@ -302,7 +317,8 @@ describe('bulk delete', () => {
     expect(button('cancel').textContent).toBe('Cancel');
     expect(button('cancel').hasAttribute('disabled')).toBe(false);
     expect(button('delete').hasAttribute('disabled')).toBe(false);
-    expect(button('select-all').hasAttribute('disabled')).toBe(false);
+    // Disabled only when there's nothing left to select.
+    expect(button('select-all').hasAttribute('disabled')).toBe(remaining().length === 0);
     expect(toolbarVisible()).toBe(selected > 0);
     if (selected > 0) {
       expect(countText()).toBe(`Delete ${selected} theme${selected === 1 ? '' : 's'}`);

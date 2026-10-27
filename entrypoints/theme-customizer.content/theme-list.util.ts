@@ -8,6 +8,7 @@ import { sendRuntimeMessage, type ThemeDeleteResponse } from '~/utils/messages';
 const INJECTED_ATTR = 'data-alfred-theme-list';
 const CHECKBOX_ATTR = 'data-alfred-theme-checkbox';
 const TOOLBAR_ATTR = 'data-alfred-bulk-toolbar';
+const SELECT_ALL_ATTR = 'data-alfred-select-all';
 const THEMES_PATH = /\/themes\/?$/;
 const DELETED_ATTR = 'data-alfred-deleted';
 /** The theme library header's Import/New button group, on stores that have New. See `findThemeActions`. */
@@ -91,6 +92,12 @@ const STYLES = `
     display: inline-flex;
     justify-content: center;
     width: 124px;
+  }
+  /* "Select all" sits in line after the theme library heading. */
+  :has(> [${SELECT_ALL_ATTR}]) {
+    display: flex;
+    align-items: center;
+    gap: var(--p-space-300);
   }
 `;
 
@@ -368,12 +375,33 @@ const fillFixedWidthButtons = (toolbar: HTMLElement) => {
 };
 
 /**
- * Shows or hides the bulk-delete toolbar, refreshes its buttons and syncs the checkboxes. The
- * delete button carries the count ("Delete 3 themes"), and progress while a delete runs
- * ("Deleting 2 of 3…"), when it and "Select all" are disabled and "Cancel" turns into "Stop".
+ * Refreshes the "Select all" button beside the theme library heading. Always shown, so a
+ * selection can start from it; it reads "Deselect all" once every theme is selected, and is
+ * disabled while a delete runs or when there are no themes to select. Only writes what differs,
+ * like the toolbar.
+ */
+const updateSelectAll = () => {
+  const button = document.querySelector(`[${SELECT_ALL_ATTR}]`);
+  if (!button) {
+    return;
+  }
+  const eligible = eligibleThemeIds();
+  const allSelected = eligible.length > 0 && eligible.every((id) => selectedThemeIds.has(id));
+  setText(button, allSelected ? 'Deselect all' : 'Select all');
+  const disabled = !!progress || eligible.length === 0;
+  if (button.hasAttribute('disabled') !== disabled) {
+    button.toggleAttribute('disabled', disabled);
+  }
+};
+
+/**
+ * Shows or hides the bulk-delete toolbar, refreshes its buttons and "Select all", and syncs the
+ * checkboxes. The delete button carries the count ("Delete 3 themes"), and progress while a
+ * delete runs ("Deleting 2 of 3…"), when it's disabled and "Cancel" turns into "Stop".
  */
 const updateToolbar = () => {
   syncCheckboxes();
+  updateSelectAll();
 
   const toolbar = document.querySelector<HTMLElement>(`[${TOOLBAR_ATTR}]`);
   if (!toolbar) {
@@ -384,10 +412,7 @@ const updateToolbar = () => {
   toolbar.classList.toggle('alfred-bulk-toolbar--show', count > 0 || !!progress);
   fillFixedWidthButtons(toolbar);
 
-  const eligible = eligibleThemeIds();
-  const allSelected = eligible.length > 0 && eligible.every((id) => selectedThemeIds.has(id));
   const buttons: [string, string, boolean][] = [
-    ['select-all', allSelected ? 'Deselect all' : 'Select all', !!progress],
     ['cancel', progress ? (stopRequested ? 'Stopping…' : 'Stop') : 'Cancel', !!progress && stopRequested],
     [
       'delete',
@@ -563,17 +588,42 @@ const injectBulkToolbar = () => {
 
   const toolbar = html(`
     <div ${TOOLBAR_ATTR}>
-      <s-internal-button variant="secondary" data-action="select-all">Select all</s-internal-button>
       <s-internal-button variant="secondary" data-action="cancel">Cancel</s-internal-button>
-      <s-internal-button variant="secondary" data-action="delete">Delete</s-internal-button>
+      <s-internal-button variant="primary" tone="critical" data-action="delete">Delete</s-internal-button>
     </div>
   `);
-  toolbar.querySelector('[data-action="select-all"]')?.addEventListener('click', handleSelectAllClick);
   toolbar.querySelector('[data-action="cancel"]')?.addEventListener('click', handleCancelClick);
   toolbar.querySelector('[data-action="delete"]')?.addEventListener('click', () => void confirmAndDeleteSelected());
 
   actions.prepend(toolbar);
   updateToolbar();
+};
+
+/**
+ * Adds "Select all" right after the theme library's heading ("Draft themes"), if it isn't there
+ * already. The heading is the one in the same header as Import, found by walking up from its
+ * button row.
+ */
+const injectSelectAll = () => {
+  if (document.querySelector(`[${SELECT_ALL_ATTR}]`)) {
+    return;
+  }
+
+  let header = findThemeActions()?.parentElement ?? null;
+  while (header && !header.querySelector('s-internal-heading')) {
+    header = header.parentElement;
+  }
+  const heading = header?.querySelector('s-internal-heading');
+  if (!heading || !document.querySelector('ul[class*="ThemeList"]')) {
+    return;
+  }
+
+  const button = html(
+    `<s-internal-button ${SELECT_ALL_ATTR} variant="secondary" data-action="select-all">Select all</s-internal-button>`
+  );
+  button.addEventListener('click', handleSelectAllClick);
+  heading.after(button);
+  updateSelectAll();
 };
 
 /**
@@ -711,6 +761,7 @@ export const injectIntoThemeList = () => {
   const checkboxesInjected = injectCheckboxes(themes);
   hideDeletedThemes();
   pruneSelection();
+  injectSelectAll();
   injectBulkToolbar();
 
   return injected || checkboxesInjected;
@@ -769,5 +820,6 @@ export const setupThemeList = async (ctx: ContentScriptContext) => {
     observer?.disconnect();
     style.remove();
     document.querySelector(`[${TOOLBAR_ATTR}]`)?.remove();
+    document.querySelector(`[${SELECT_ALL_ATTR}]`)?.remove();
   });
 };
