@@ -73,31 +73,35 @@ const STYLES = `
   [${DELETED_ATTR}] {
     display: none !important;
   }
-  /* Shopify's group is nowrap; on narrow screens the toolbar would push Import and New off the
-     edge, so it wraps onto its own line instead. */
-  .Polaris-InlineStack:has(> [${TOOLBAR_ATTR}]) {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
   [${TOOLBAR_ATTR}] {
     display: none;
+  }
+  /* Its buttons join the heading's row, so every button there gets the same gap. */
+  [${TOOLBAR_ATTR}].alfred-bulk-toolbar--show {
+    display: contents;
+  }
+  /* Sized for their longest text, so the buttons after them don't shift as it changes: Delete's
+     count and progress, and "Select all" / "Deselect all". */
+  [${TOOLBAR_ATTR}] > [data-action="delete"],
+  [${SELECT_ALL_ATTR}] {
+    display: inline-flex;
+    justify-content: center;
+  }
+  [${TOOLBAR_ATTR}] > [data-action="delete"] {
+    width: 124px;
+  }
+  /* "Select all" and the toolbar sit in line after the theme library heading, wrapping on
+     narrow screens. The buttons are spaced like Shopify's Import and New, and the heading
+     a little further off. */
+  :has(> [${SELECT_ALL_ATTR}]) {
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--p-space-200);
   }
-  [${TOOLBAR_ATTR}].alfred-bulk-toolbar--show {
-    display: flex;
-  }
-  /* Fixed so the buttons don't shift as the count and progress in its text change. */
-  [${TOOLBAR_ATTR}] > [data-action="delete"] {
-    display: inline-flex;
-    justify-content: center;
-    width: 124px;
-  }
-  /* "Select all" sits in line after the theme library heading. */
-  :has(> [${SELECT_ALL_ATTR}]) {
-    display: flex;
-    align-items: center;
-    gap: var(--p-space-300);
+  [${SELECT_ALL_ATTR}] {
+    min-width: 100px;
+    margin-inline-start: var(--p-space-100);
   }
 `;
 
@@ -293,9 +297,6 @@ const selectedThemeIds = new Set<string>();
 /** Set while a bulk delete is running: which theme it's on, out of how many. */
 let progress: { current: number; total: number } | null = null;
 
-/** Set by the toolbar's "Stop" button to end a running bulk delete after the current theme. */
-let stopRequested = false;
-
 /**
  * Themes Alfred deleted through the API. Shopify's list doesn't know they're gone until it next
  * loads its data, so their cards are hidden in the meantime.
@@ -348,20 +349,19 @@ const syncCheckboxes = () => {
   });
 };
 
-/** Shared by every fixed-width toolbar button's shadow root; created on first use. */
+/** Shared by every fixed-width button's shadow root; created on first use. */
 let fillButtonSheet: CSSStyleSheet | null = null;
 
 /**
- * Stretches the real `<button>` inside the fixed-width toolbar buttons to their full width, so
- * the whole width is filled and clickable. It lives in `s-internal-button`'s shadow root, which
- * page CSS can't reach, so the rule is adopted into that root; `!important` beats the
+ * Stretches the real `<button>` inside Delete and "Select all" to their full width, so the width
+ * `STYLES` gives them is filled and clickable. It lives in `s-internal-button`'s shadow root,
+ * which page CSS can't reach, so the rule is adopted into that root; `!important` beats the
  * component's own sizing of `.button`. Runs on every toolbar update, since a shadow root can
- * attach after the toolbar is inserted, and skips roots that already have the rule. Adopting a
+ * attach after the button is inserted, and skips roots that already have the rule. Adopting a
  * sheet isn't a DOM mutation, so it can't retrigger the observer.
- * @param toolbar - The bulk-delete toolbar.
  */
-const fillFixedWidthButtons = (toolbar: HTMLElement) => {
-  for (const button of toolbar.querySelectorAll('[data-action="delete"]')) {
+const fillFixedWidthButtons = () => {
+  for (const button of document.querySelectorAll(`[${TOOLBAR_ATTR}] > [data-action="delete"], [${SELECT_ALL_ATTR}]`)) {
     const root = button.shadowRoot;
     if (!root || (fillButtonSheet && root.adoptedStyleSheets.includes(fillButtonSheet))) {
       continue;
@@ -397,7 +397,7 @@ const updateSelectAll = () => {
 /**
  * Shows or hides the bulk-delete toolbar, refreshes its buttons and "Select all", and syncs the
  * checkboxes. The delete button carries the count ("Delete 3 themes"), and progress while a
- * delete runs ("Deleting 2 of 3…"), when it's disabled and "Cancel" turns into "Stop".
+ * delete runs ("Deleting 2 of 3…"), when both toolbar buttons are disabled.
  */
 const updateToolbar = () => {
   syncCheckboxes();
@@ -410,21 +410,15 @@ const updateToolbar = () => {
 
   const count = selectedThemeIds.size;
   toolbar.classList.toggle('alfred-bulk-toolbar--show', count > 0 || !!progress);
-  fillFixedWidthButtons(toolbar);
+  fillFixedWidthButtons();
 
-  const buttons: [string, string, boolean][] = [
-    ['cancel', progress ? (stopRequested ? 'Stopping…' : 'Stop') : 'Cancel', !!progress && stopRequested],
-    [
-      'delete',
-      progress ? `Deleting ${progress.current} of ${progress.total}…` : `Delete ${themeCount(count)}`,
-      !!progress
-    ]
-  ];
-  for (const [action, text, disabled] of buttons) {
-    const button = toolbar.querySelector(`[data-action="${action}"]`);
-    setText(button, text);
-    if (button && button.hasAttribute('disabled') !== disabled) {
-      button.toggleAttribute('disabled', disabled);
+  setText(
+    toolbar.querySelector('[data-action="delete"]'),
+    progress ? `Deleting ${progress.current} of ${progress.total}…` : `Delete ${themeCount(count)}`
+  );
+  for (const button of toolbar.querySelectorAll('[data-action]')) {
+    if (button.hasAttribute('disabled') !== !!progress) {
+      button.toggleAttribute('disabled', !!progress);
     }
   }
 };
@@ -515,15 +509,22 @@ const pruneSelection = () => {
 };
 
 /**
- * Unchecks every theme, clears the selection and hides the toolbar. Deletes nothing.
+ * Unchecks every theme, clears the selection and hides the toolbar. Deletes nothing, and does
+ * nothing while a delete runs, since its selection is fixed until it ends.
  */
 const clearSelection = () => {
+  if (progress) {
+    return;
+  }
   selectedThemeIds.clear();
   updateToolbar();
 };
 
 /**
  * Selects every library theme on the page, or clears the selection if they all already are.
+ * Themes behind Shopify's "Show all" button aren't rendered until it's clicked, so they're left
+ * out: a delete only ever takes themes the user can see, and once they're shown the button reads
+ * "Select all" again to add them.
  */
 const handleSelectAllClick = () => {
   if (progress) {
@@ -539,21 +540,8 @@ const handleSelectAllClick = () => {
 };
 
 /**
- * The toolbar's "Cancel" button: clears the selection normally, or asks a running bulk delete
- * to stop once the theme it's on is settled.
- */
-const handleCancelClick = () => {
-  if (progress) {
-    stopRequested = true;
-    updateToolbar();
-  } else {
-    clearSelection();
-  }
-};
-
-/**
  * The theme library header's button row holding Import (and New, where the store has it), which
- * the toolbar goes at the start of. Stores with New wrap both in a "Theme actions" group; stores
+ * leads to the header's heading. Stores with New wrap both in a "Theme actions" group; stores
  * without it have no group, and Import sits straight in the header's button row. Either way the
  * row is the nearest `InlineStack` around Import, or around New (the only button with a plus
  * icon) if Import's label is translated.
@@ -570,10 +558,11 @@ const findThemeActions = () => {
 };
 
 /**
- * Adds the bulk-delete toolbar to the theme library's header, just before Import and New, if it
- * isn't already there (React re-renders can remove it, same as the per-theme injections). Its
- * state lives in module variables, so a re-added toolbar picks up where the old one left off,
- * even mid-delete.
+ * Adds the bulk-delete toolbar right after "Select all", if it isn't already there (React
+ * re-renders can remove it, same as the per-theme injections), keeping Alfred's buttons on the
+ * left of the header and Shopify's on the right. Delete comes first, then an icon-only button
+ * that clears the selection. Its state lives in module variables, so a re-added toolbar picks
+ * up where the old one left off, even mid-delete.
  */
 const injectBulkToolbar = () => {
   if (document.querySelector(`[${TOOLBAR_ATTR}]`)) {
@@ -581,21 +570,21 @@ const injectBulkToolbar = () => {
     return;
   }
 
-  const actions = findThemeActions();
-  if (!actions || !document.querySelector('ul[class*="ThemeList"]')) {
+  const selectAll = document.querySelector(`[${SELECT_ALL_ATTR}]`);
+  if (!selectAll) {
     return;
   }
 
   const toolbar = html(`
     <div ${TOOLBAR_ATTR}>
-      <s-internal-button variant="secondary" data-action="cancel">Cancel</s-internal-button>
       <s-internal-button variant="primary" tone="critical" data-action="delete">Delete</s-internal-button>
+      <s-internal-button variant="tertiary" icon="x" accessibilitylabel="Clear selection" title="Clear selection" data-action="clear"></s-internal-button>
     </div>
   `);
-  toolbar.querySelector('[data-action="cancel"]')?.addEventListener('click', handleCancelClick);
   toolbar.querySelector('[data-action="delete"]')?.addEventListener('click', () => void confirmAndDeleteSelected());
+  toolbar.querySelector('[data-action="clear"]')?.addEventListener('click', clearSelection);
 
-  actions.prepend(toolbar);
+  selectAll.after(toolbar);
   updateToolbar();
 };
 
@@ -645,26 +634,19 @@ const deleteOneTheme = async (themeId: string): Promise<ThemeDeleteResponse> => 
 interface BulkDeleteResult {
   deleted: string[];
   failed: { id: string; name: string; reason: string }[];
-  /** Themes never reached because the run was stopped. */
-  stopped: string[];
 }
 
 /**
- * Deletes each theme in turn, so "Stop" takes effect between themes and progress stays accurate.
- * Each theme is independent: a failure on one moves on to the next. Deleted themes leave the
- * selection and are hidden from the list; failed and stopped ones stay selected to retry.
+ * Deletes each theme in turn, so progress stays accurate. Each theme is independent: a failure
+ * on one moves on to the next. Deleted themes leave the selection and are hidden from the list;
+ * failed ones stay selected to retry.
  * @param ids - Theme IDs to delete.
  * @param names - Theme names by ID, for the summary.
  */
 const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<BulkDeleteResult> => {
-  const result: BulkDeleteResult = { deleted: [], failed: [], stopped: [] };
+  const result: BulkDeleteResult = { deleted: [], failed: [] };
 
   for (const [index, id] of ids.entries()) {
-    if (stopRequested) {
-      result.stopped.push(...ids.slice(index));
-      break;
-    }
-
     progress = { current: index + 1, total: ids.length };
     updateToolbar();
 
@@ -688,11 +670,8 @@ const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<
  * Sums up a bulk delete for the toast, e.g. "Deleted 3 themes, couldn't delete Horizon (reason)."
  * @param result - What {@link deleteThemes} returned.
  */
-const summarizeBulkDelete = ({ deleted, failed, stopped }: BulkDeleteResult) => {
+const summarizeBulkDelete = ({ deleted, failed }: BulkDeleteResult) => {
   const parts = [`Deleted ${themeCount(deleted.length)}`];
-  if (stopped.length > 0) {
-    parts.push(`stopped before ${stopped.length}`);
-  }
   if (failed.length > 0) {
     parts.push(`couldn't delete ${failed.map((f) => `${f.name} (${f.reason})`).join(', ')}`);
   }
@@ -715,15 +694,21 @@ const confirmAndDeleteSelected = async () => {
   }
 
   const names = new Map(collectThemeElements().map((theme) => [theme.themeId, theme.name]));
+  const [only, ...others] = ids.map((id) => names.get(id) ?? id);
   const listed = ids.slice(0, CONFIRM_NAME_LIMIT).map((id) => `• ${names.get(id) ?? id}`);
   if (ids.length > CONFIRM_NAME_LIMIT) {
     listed.push(`…and ${ids.length - CONFIRM_NAME_LIMIT} more`);
   }
-  if (!confirm(`Permanently delete ${themeCount(ids.length)}? This can't be undone.\n\n${listed.join('\n')}`)) {
+  // Worded like Shopify's own confirmation for deleting one theme.
+  const question = 'Do you still want to continue?';
+  const message =
+    others.length === 0
+      ? `Once deleted, ${only} cannot be recovered. ${question}`
+      : `Once deleted, these ${themeCount(ids.length)} cannot be recovered:\n\n${listed.join('\n')}\n\n${question}`;
+  if (!confirm(message)) {
     return;
   }
 
-  stopRequested = false;
   progress = { current: 0, total: ids.length };
   updateToolbar();
 
@@ -732,8 +717,7 @@ const confirmAndDeleteSelected = async () => {
     result = await deleteThemes(ids, names);
   } finally {
     progress = null;
-    stopRequested = false;
-    // Navigating away mid-run stops it; what's left of the selection goes with the page.
+    // A run carries on if the frame navigates away; what's left of the selection goes with the page.
     if (THEMES_PATH.test(window.location.pathname)) {
       updateToolbar();
     } else {
@@ -788,12 +772,9 @@ export const setupThemeList = async (ctx: ContentScriptContext) => {
     if (!THEMES_PATH.test(pathname)) {
       observer?.disconnect();
       observer = undefined;
-      // A selection made on this page shouldn't still be there on returning to it.
-      if (progress) {
-        stopRequested = true;
-      } else {
-        clearSelection();
-      }
+      // A selection made on this page shouldn't still be there on returning to it. A running
+      // delete clears what's left of it once it ends.
+      clearSelection();
       return;
     }
     if (observer) {

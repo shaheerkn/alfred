@@ -170,6 +170,12 @@ const toggleCheckbox = (checkbox: HTMLElement, value: boolean) => {
   if (shownChecked(checkbox) !== value) checkboxInput(checkbox).click();
 };
 const toolbar = () => document.querySelector<HTMLElement>('[data-alfred-bulk-toolbar]');
+const selectAll = () => document.querySelector<HTMLElement>('[data-alfred-select-all]');
+// Select all follows the theme library heading, and the toolbar follows Select all.
+const expectBesideHeading = () => {
+  expect(selectAll()?.previousElementSibling?.tagName).toBe('S-INTERNAL-HEADING');
+  expect(selectAll()?.nextElementSibling).toBe(toolbar());
+};
 const toolbarVisible = () => toolbar()?.classList.contains('alfred-bulk-toolbar--show') ?? false;
 const copyValues = (row: Element) =>
   [...row.querySelectorAll('s-internal-button')].map((b) => b.getAttribute('data-copy-value'));
@@ -234,26 +240,27 @@ describe('injectIntoThemeList', () => {
     }
   });
 
-  it("puts the toolbar in the theme library's header, before Import and New", () => {
+  it('puts the toolbar right after Select all: Delete, then an icon-only button that clears the selection', () => {
     injectIntoThemeList();
 
-    const group = document.querySelector('[role="group"][aria-label="Theme actions"]')!;
-    expect(toolbar()?.parentElement).toBe(group);
-    expect(group.firstElementChild).toBe(toolbar());
-    expect([...group.querySelectorAll('s-internal-button:not([data-action])')].map((b) => b.textContent)).toEqual([
-      'Import',
-      'New'
+    expectBesideHeading();
+    const buttons = [...toolbar()!.querySelectorAll('s-internal-button')];
+    expect(buttons.map((b) => [b.dataset.action, b.getAttribute('variant'), b.getAttribute('icon')])).toEqual([
+      ['delete', 'primary', null],
+      ['clear', 'tertiary', 'x']
     ]);
+    expect(buttons[1].getAttribute('accessibilitylabel')).toBe('Clear selection');
+    // Shopify's own buttons are left as they were.
+    const group = document.querySelector('[role="group"][aria-label="Theme actions"]')!;
+    expect([...group.querySelectorAll('s-internal-button')].map((b) => b.textContent)).toEqual(['Import', 'New']);
   });
 
   it('puts Select all right after the theme library heading, shown with nothing selected', () => {
     injectIntoThemeList();
 
-    const selectAll = document.querySelector('[data-alfred-select-all]')!;
-    expect(selectAll.previousElementSibling?.tagName).toBe('S-INTERNAL-HEADING');
-    expect(selectAll.textContent).toBe('Select all');
-    expect(selectAll.hasAttribute('disabled')).toBe(false);
-    expect(toolbar()?.contains(selectAll)).toBe(false);
+    expect(selectAll()?.previousElementSibling?.tagName).toBe('S-INTERNAL-HEADING');
+    expect(selectAll()?.textContent).toBe('Select all');
+    expect(selectAll()?.hasAttribute('disabled')).toBe(false);
   });
 
   it('finds the header by its New button when the group label is translated', () => {
@@ -261,7 +268,7 @@ describe('injectIntoThemeList', () => {
     group.setAttribute('aria-label', 'Acciones de tema');
     try {
       injectIntoThemeList();
-      expect(toolbar()?.parentElement).toBe(group);
+      expectBesideHeading();
     } finally {
       group.setAttribute('aria-label', 'Theme actions');
     }
@@ -279,8 +286,7 @@ describe('injectIntoThemeList', () => {
       </div></div>`;
     try {
       injectIntoThemeList();
-      expect(toolbar()?.parentElement).toBe(row);
-      expect(row.firstElementChild).toBe(toolbar());
+      expectBesideHeading();
     } finally {
       row.innerHTML = original;
     }
@@ -314,9 +320,11 @@ describe('bulk delete', () => {
       (toast) => toast.shadowRoot!.querySelector('.alfred-toast__text')!.textContent
     );
   const expectIdle = (selected: number) => {
-    expect(button('cancel').textContent).toBe('Cancel');
-    expect(button('cancel').hasAttribute('disabled')).toBe(false);
+    expect(button('clear').hasAttribute('disabled')).toBe(false);
     expect(button('delete').hasAttribute('disabled')).toBe(false);
+    expect(button('select-all').textContent).toBe(
+      selected > 0 && selected === remaining().length ? 'Deselect all' : 'Select all'
+    );
     // Disabled only when there's nothing left to select.
     expect(button('select-all').hasAttribute('disabled')).toBe(remaining().length === 0);
     expect(toolbarVisible()).toBe(selected > 0);
@@ -331,7 +339,7 @@ describe('bulk delete', () => {
   const requestedNames = () => deleteRequests.map((id) => NAMES.find((name) => idOf(name) === id));
 
   beforeEach(() => {
-    if (toolbar()) click(button('cancel')); // clears whatever selection the last test left
+    if (toolbar()) click(button('clear')); // clears whatever selection the last test left
     round++;
     list().innerHTML = NAMES.map((name) => themeItem(idOf(name), name, 'editor')).join('');
     confirmResult = true;
@@ -354,11 +362,11 @@ describe('bulk delete', () => {
     expectIdle(0);
   });
 
-  it('Cancel deselects every theme and hides the toolbar without deleting anything', () => {
+  it('The clear button deselects every theme and hides the toolbar without deleting anything', () => {
     select('Alpha', 'Beta', 'Gamma');
     expectIdle(3);
 
-    click(button('cancel'));
+    click(button('clear'));
 
     expect(checkedNames()).toEqual([]);
     expectIdle(0);
@@ -368,19 +376,34 @@ describe('bulk delete', () => {
 
   it('Select all checks every library theme (never the live one), and toggles to Deselect all', () => {
     select('Alpha');
-    expect(button('select-all').textContent).toBe('Select all');
 
     click(button('select-all'));
     expect(checkedNames()).toEqual(NAMES);
     expectIdle(3);
-    expect(button('select-all').textContent).toBe('Deselect all');
 
     click(button('select-all'));
     expect(checkedNames()).toEqual([]);
     expectIdle(0);
   });
 
-  it('Select all, Deselect all and Cancel also move checkboxes the user clicked by hand', () => {
+  it("Select all leaves out themes behind Shopify's Show all, and adds them once they're shown", () => {
+    const gamma = card('Gamma')!;
+    gamma.remove(); // the list starts collapsed, without its later themes
+
+    click(button('select-all'));
+    expect(checkedNames()).toEqual(['Alpha', 'Beta']);
+    expectIdle(2);
+
+    list().append(gamma); // "Show all"
+    injectIntoThemeList();
+    expectIdle(2);
+
+    click(button('select-all'));
+    expect(checkedNames()).toEqual(NAMES);
+    expectIdle(3);
+  });
+
+  it('Select all, Deselect all and the clear button also move checkboxes the user clicked by hand', () => {
     // Regression: once clicked, s-checkbox stops following `checked` set from code, so boxes
     // the user had clicked kept their checkmark through Select all / Deselect all.
     select('Alpha');
@@ -397,7 +420,7 @@ describe('bulk delete', () => {
 
     select('Alpha', 'Gamma');
     click(button('select-all'));
-    click(button('cancel'));
+    click(button('clear'));
     expect(checkedNames()).toEqual([]);
     expectIdle(0);
   });
@@ -423,7 +446,7 @@ describe('bulk delete', () => {
 
   it("doesn't touch the DOM on a pass where nothing changed, so the observer can't feed itself", async () => {
     // Regression: rewriting the buttons' text on every pass was itself a mutation, which
-    // re-triggered the observer every frame and rebuilt the Cancel button's contents under the
+    // re-triggered the observer every frame and rebuilt the toolbar buttons' contents under the
     // pointer, so its clicks never landed.
     select('Alpha', 'Beta');
     const records: unknown[] = [];
@@ -440,13 +463,18 @@ describe('bulk delete', () => {
   });
 
   it('names every selected theme in the confirmation, and deletes nothing if it is cancelled', async () => {
-    select('Alpha', 'Gamma');
-
     confirmResult = false;
+    select('Alpha');
     click(button('delete'));
     await tick(100);
+    expect(confirmMessage).toBe('Once deleted, Alpha cannot be recovered. Do you still want to continue?');
 
-    expect(confirmMessage).toBe("Permanently delete 2 themes? This can't be undone.\n\n• Alpha\n• Gamma");
+    select('Gamma');
+    click(button('delete'));
+    await tick(100);
+    expect(confirmMessage).toBe(
+      'Once deleted, these 2 themes cannot be recovered:\n\n• Alpha\n• Gamma\n\nDo you still want to continue?'
+    );
     expect(deleteRequests).toEqual([]);
     expect(remaining()).toEqual(NAMES);
     expect(checkedNames()).toEqual(['Alpha', 'Gamma']);
@@ -494,7 +522,7 @@ describe('bulk delete', () => {
     expect(toastTexts().at(-1)).toBe("Deleted 0 themes, couldn't delete Beta (Could not establish connection).");
   });
 
-  it('shows progress and ignores checkbox changes while a delete is running', async () => {
+  it('shows progress and ignores checkbox changes and clearing while a delete is running', async () => {
     select('Alpha', 'Beta');
     let finish = () => {};
     respondToDelete = () => new Promise((resolve) => (finish = () => resolve({ ok: true })));
@@ -502,13 +530,15 @@ describe('bulk delete', () => {
     click(button('delete'));
     await waitUntil(() => deleteRequests.length === 1);
     expect(countText()).toBe('Deleting 1 of 2…');
-    expect(button('cancel').textContent).toBe('Stop');
     expect(button('delete').hasAttribute('disabled')).toBe(true);
+    expect(button('clear').hasAttribute('disabled')).toBe(true);
     expect(checkboxOf('Gamma').hasAttribute('disabled')).toBe(true);
 
     toggleCheckbox(checkboxOf('Beta'), false);
     toggleCheckbox(checkboxOf('Gamma'), true);
+    click(button('clear'));
     expect(checkedNames()).toEqual(['Alpha', 'Beta']);
+    expect(countText()).toBe('Deleting 1 of 2…');
 
     finish();
     await waitUntil(() => deleteRequests.length === 2);
@@ -517,28 +547,6 @@ describe('bulk delete', () => {
 
     expect(remaining()).toEqual(['Gamma']);
     expectIdle(0);
-  });
-
-  it('Stop ends the run after the current theme and keeps the rest selected', async () => {
-    select('Alpha', 'Beta', 'Gamma');
-    let finish = () => {};
-    respondToDelete = () => new Promise((resolve) => (finish = () => resolve({ ok: true })));
-
-    click(button('delete'));
-    await waitUntil(() => deleteRequests.length === 1);
-    click(button('cancel'));
-    expect(button('cancel').textContent).toBe('Stopping…');
-    expect(button('cancel').hasAttribute('disabled')).toBe(true);
-
-    finish();
-    await waitUntil(() => countText() === 'Delete 2 themes');
-
-    expect(requestedNames()).toEqual(['Alpha']);
-    expect(remaining()).toEqual(['Beta', 'Gamma']);
-    expect(checkedNames()).toEqual(['Beta', 'Gamma']);
-    expectIdle(2);
-    await waitUntil(() => toastTexts().at(-1) === 'Deleted 1 theme, stopped before 2.');
-    expect(toastTexts().at(-1)).toBe('Deleted 1 theme, stopped before 2.');
   });
 
   it('keeps a deleted theme hidden and unselectable when React renders its card again', async () => {
@@ -555,7 +563,7 @@ describe('bulk delete', () => {
     expect(countText()).toBe('Delete 2 themes');
   });
 
-  it('works again after a completed delete without a reload: select, cancel, delete', async () => {
+  it('works again after a completed delete without a reload: select, clear, delete', async () => {
     select('Alpha');
     click(button('delete'));
     await waitUntil(() => !toolbarVisible());
@@ -563,7 +571,7 @@ describe('bulk delete', () => {
 
     select('Beta', 'Gamma');
     expectIdle(2);
-    click(button('cancel'));
+    click(button('clear'));
     expect(checkedNames()).toEqual([]);
     expectIdle(0);
 
