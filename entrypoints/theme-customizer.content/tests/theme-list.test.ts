@@ -152,7 +152,10 @@ dom.customElements.define('s-checkbox', FakeCheckbox);
 
 const { injectIntoThemeList } = await import('../theme-list.util');
 
-afterAll(() => {
+afterAll(async () => {
+  // Toast.show waits 100ms to add a toast while another is still showing; let any pending one
+  // land while `document` is still linkedom's, or it throws during the next test file.
+  await new Promise((resolve) => setTimeout(resolve, 200));
   for (const [k, v] of saved) g[k] = v;
 });
 
