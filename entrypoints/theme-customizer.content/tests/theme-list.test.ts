@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test';
 import { parseHTML } from 'linkedom';
+import type { RuntimeMessage, ThemeDeleteResponse } from '~/utils/messages';
 
 // Trimmed from the redesigned themes page (online-store-web.shopifyapps.com/themes).
 const themeItem = (id: string, name: string, editPath: string) => `
@@ -54,6 +55,15 @@ const dom = parseHTML(`<html><body>
   <div class="Polaris-BlockStack">
     ${publishedTheme('158745460950', 'Prod')}
     <s-internal-section padding="none">
+      <div class="Polaris-InlineStack">
+        <s-internal-heading level="2">Theme library</s-internal-heading>
+        <div class="Polaris-InlineStack">
+          <div class="Polaris-InlineStack" role="group" aria-label="Theme actions">
+            <div class="_PopoverRegion_w8ime_1"><s-internal-button variant="secondary" accessibilitylabel="Import themes">Import</s-internal-button></div>
+            <div class="_PopoverRegion_1ivd1_1"><s-internal-button variant="secondary" icon="plus">New</s-internal-button></div>
+          </div>
+        </div>
+      </div>
       <ul class="_ThemeList_11pt9_1 _NewThemeList_11pt9_19">
         ${themeItem('188431433942', 'Copy of Horizon', 'canvas?editorEntry=themeIndex')}
         ${themeItem('159845974230', 'Horizon', 'editor')}
@@ -68,17 +78,39 @@ const { document } = dom;
 // confirm is stubbed too: the real one blocks on stdin in this test runner.
 const g = globalThis as Record<string, unknown>;
 // window only needs a location: deletes check they're still on the themes page.
-const saved = ['document', 'window', 'HTMLElement', 'customElements', 'requestAnimationFrame', 'confirm'].map(
-  (k) => [k, g[k]] as const
-);
+const saved = [
+  'document',
+  'window',
+  'HTMLElement',
+  'customElements',
+  'requestAnimationFrame',
+  'confirm',
+  'browser'
+].map((k) => [k, g[k]] as const);
 let confirmResult = true;
+let confirmMessage = '';
+// Stands in for the background relaying `delete_theme` to the admin page, which calls the API.
+const deleteRequests: string[] = [];
+let respondToDelete: (themeId: string) => Promise<ThemeDeleteResponse> = () => Promise.resolve({ ok: true });
 Object.assign(g, {
   document,
   window: { location: { pathname: '/store/demo-store/themes' } },
   HTMLElement: dom.HTMLElement,
   customElements: dom.customElements,
   requestAnimationFrame: (cb: () => void) => setTimeout(cb, 0),
-  confirm: () => confirmResult
+  confirm: (message: string) => {
+    confirmMessage = message;
+    return confirmResult;
+  },
+  browser: {
+    runtime: {
+      sendMessage: (message: RuntimeMessage) => {
+        if (message.type !== 'delete_theme') return Promise.resolve();
+        deleteRequests.push(message.themeId);
+        return respondToDelete(message.themeId);
+      }
+    }
+  }
 });
 
 // Mirrors the real s-checkbox just enough for tests: a real <input type="checkbox"> inside an
@@ -191,11 +223,56 @@ describe('injectIntoThemeList', () => {
     expect(checkboxes().every((checkbox) => checkbox.hasAttribute('accessibilitylabel'))).toBe(true);
   });
 
-  it('adds the toolbar as a direct child of <body>, floating free of the themes list and its manually-slotted <s-internal-section>', () => {
+  it("puts each checkbox before the theme's thumbnail, outside its grid", () => {
     injectIntoThemeList();
 
-    expect(toolbar()?.parentElement).toBe(document.body);
-    expect(toolbar()?.closest('s-internal-section')).toBeNull();
+    for (const checkbox of checkboxes()) {
+      const grid = checkbox.nextElementSibling!;
+      expect(grid.classList.contains('Polaris-InlineGrid')).toBe(true);
+      expect(grid.querySelector('[class*="ThemeListThumbnail"]')).not.toBeNull();
+    }
+  });
+
+  it("puts the toolbar in the theme library's header, before Import and New", () => {
+    injectIntoThemeList();
+
+    const group = document.querySelector('[role="group"][aria-label="Theme actions"]')!;
+    expect(toolbar()?.parentElement).toBe(group);
+    expect(group.firstElementChild).toBe(toolbar());
+    expect([...group.querySelectorAll('s-internal-button:not([data-action])')].map((b) => b.textContent)).toEqual([
+      'Import',
+      'New'
+    ]);
+  });
+
+  it('finds the header by its New button when the group label is translated', () => {
+    const group = document.querySelector('[role="group"]')!;
+    group.setAttribute('aria-label', 'Acciones de tema');
+    try {
+      injectIntoThemeList();
+      expect(toolbar()?.parentElement).toBe(group);
+    } finally {
+      group.setAttribute('aria-label', 'Theme actions');
+    }
+  });
+
+  it('finds the header by its Import button on stores without New, which have no group', () => {
+    // Trimmed from a store whose header has only Import, straight in the button row.
+    const row = document.querySelector('[role="group"]')!.parentElement!;
+    const original = row.innerHTML;
+    row.innerHTML = `
+      <div class="_PopoverRegion_w8ime_1"><div class="_ButtonHeight_w8ime_9">
+        <s-internal-button commandfor=":r4:" variant="secondary" accessibilitylabel="Import themes">
+          <span class="_ButtonMargin_w8ime_5"><div class="Polaris-InlineStack">Import</div></span>
+        </s-internal-button>
+      </div></div>`;
+    try {
+      injectIntoThemeList();
+      expect(toolbar()?.parentElement).toBe(row);
+      expect(row.firstElementChild).toBe(toolbar());
+    } finally {
+      row.innerHTML = original;
+    }
   });
 });
 
@@ -204,12 +281,14 @@ describe('bulk delete', () => {
   const list = () => document.querySelector('ul[class*="ThemeList"]')!;
   const card = (name: string) =>
     [...document.querySelectorAll('li')].find((li) => li.querySelector('h3')?.textContent === name);
+  const shown = (name: string) => !!card(name) && !card(name)!.hasAttribute('data-alfred-deleted');
   const checkboxOf = (name: string) => card(name)!.querySelector<HTMLElement>('[data-alfred-theme-checkbox]')!;
-  const checkedNames = () => NAMES.filter((name) => card(name) && shownChecked(checkboxOf(name)));
-  const remaining = () => NAMES.filter((name) => card(name));
+  const checkedNames = () => NAMES.filter((name) => shown(name) && shownChecked(checkboxOf(name)));
+  const remaining = () => NAMES.filter(shown);
   const button = (action: string) => toolbar()!.querySelector<HTMLElement>(`[data-action="${action}"]`)!;
   const click = (el: Element) => el.dispatchEvent(new dom.Event('click', { bubbles: true }));
-  const countText = () => toolbar()?.querySelector('.alfred-bulk-toolbar__count')?.textContent;
+  // The delete button carries the count, and progress while a delete runs.
+  const countText = () => toolbar()?.querySelector('[data-action="delete"]')?.textContent;
   const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
   const waitUntil = async (check: () => boolean) => {
     for (let i = 0; i < 300 && !check(); i++) await tick();
@@ -219,42 +298,6 @@ describe('bulk delete', () => {
     [...document.querySelectorAll('alfred-toast')].map(
       (toast) => toast.shadowRoot!.querySelector('.alfred-toast__text')!.textContent
     );
-
-  // Stand-ins for Shopify's own UI. Each theme gets its own "more actions" popover whose
-  // destructive "Delete" item either removes the theme straight away or opens a confirmation
-  // dialog, where Cancel just closes it and "Delete theme" removes the theme too.
-  const stubMenu = (name: string, mode: 'dialog' | 'immediate') => {
-    const li = card(name)!;
-    const moreButton = li.querySelector('button[commandfor]')!;
-    const popover = document.createElement('s-popover');
-    popover.id = `menu-${name}`;
-    moreButton.setAttribute('commandfor', popover.id);
-    popover.innerHTML = '<button type="button" class="Polaris-ActionList--destructive">Delete</button>';
-    popover.querySelector('button')!.addEventListener('click', () => {
-      if (mode === 'immediate') {
-        li.remove();
-        return;
-      }
-      const dialog = document.createElement('div');
-      dialog.setAttribute('role', 'dialog');
-      dialog.innerHTML = `<h2>Delete ${name}?</h2><button type="button">Cancel</button><button type="button">Delete theme</button>`;
-      const [cancel, confirm] = dialog.querySelectorAll('button');
-      cancel.addEventListener('click', () => dialog.remove());
-      confirm.addEventListener('click', () => {
-        li.remove();
-        dialog.remove();
-      });
-      document.body.append(dialog);
-    });
-    moreButton.after(popover);
-  };
-  // Waits for the named theme's dialog, then answers it like the user would.
-  const answerDialog = async (name: string, answer: 'Cancel' | 'Delete theme') => {
-    const dialog = () =>
-      [...document.querySelectorAll('[role="dialog"]')].find((d) => d.textContent?.includes(`Delete ${name}?`));
-    await waitUntil(() => !!dialog());
-    click([...dialog()!.querySelectorAll('button')].find((b) => b.textContent === answer)!);
-  };
   const expectIdle = (selected: number) => {
     expect(button('cancel').textContent).toBe('Cancel');
     expect(button('cancel').hasAttribute('disabled')).toBe(false);
@@ -262,15 +305,23 @@ describe('bulk delete', () => {
     expect(button('select-all').hasAttribute('disabled')).toBe(false);
     expect(toolbarVisible()).toBe(selected > 0);
     if (selected > 0) {
-      expect(countText()).toBe(`${selected} theme${selected === 1 ? '' : 's'} selected`);
+      expect(countText()).toBe(`Delete ${selected} theme${selected === 1 ? '' : 's'}`);
     }
   };
+  // Each test gets fresh theme IDs: Alfred remembers the ones it deleted for the whole page.
+  let round = 0;
+  const idOf = (name: string) => `${round}0${NAMES.indexOf(name) + 1}`;
+  // Names of the themes the API was asked to delete, in order.
+  const requestedNames = () => deleteRequests.map((id) => NAMES.find((name) => idOf(name) === id));
 
   beforeEach(() => {
     if (toolbar()) click(button('cancel')); // clears whatever selection the last test left
-    document.querySelectorAll('[role="dialog"], s-popover[id^="menu-"]').forEach((el) => el.remove());
-    list().innerHTML = NAMES.map((name, i) => themeItem(`${i + 1}00`, name, 'editor')).join('');
+    round++;
+    list().innerHTML = NAMES.map((name) => themeItem(idOf(name), name, 'editor')).join('');
     confirmResult = true;
+    confirmMessage = '';
+    deleteRequests.length = 0;
+    respondToDelete = () => Promise.resolve({ ok: true });
     injectIntoThemeList();
   });
 
@@ -296,6 +347,7 @@ describe('bulk delete', () => {
     expect(checkedNames()).toEqual([]);
     expectIdle(0);
     expect(remaining()).toEqual(NAMES);
+    expect(deleteRequests).toEqual([]);
   });
 
   it('Select all checks every library theme (never the live one), and toggles to Deselect all', () => {
@@ -371,96 +423,124 @@ describe('bulk delete', () => {
     expect(records.length).toBe(0);
   });
 
-  it('does nothing when the initial confirmation is cancelled', async () => {
-    select('Alpha', 'Beta', 'Gamma');
-    NAMES.forEach((name) => stubMenu(name, 'immediate'));
+  it('names every selected theme in the confirmation, and deletes nothing if it is cancelled', async () => {
+    select('Alpha', 'Gamma');
 
     confirmResult = false;
     click(button('delete'));
     await tick(100);
 
+    expect(confirmMessage).toBe("Permanently delete 2 themes? This can't be undone.\n\n• Alpha\n• Gamma");
+    expect(deleteRequests).toEqual([]);
     expect(remaining()).toEqual(NAMES);
-    expect(checkedNames()).toEqual(NAMES);
-    expectIdle(3);
+    expect(checkedNames()).toEqual(['Alpha', 'Gamma']);
+    expectIdle(2);
   });
 
-  it("skips a theme canceled in Shopify's dialog and carries on with the rest", async () => {
+  it('deletes each selected theme through the API and hides it from the list', async () => {
     select('Alpha', 'Beta', 'Gamma');
-    NAMES.forEach((name) => stubMenu(name, 'dialog'));
 
     click(button('delete'));
-    await waitUntil(() => countText() === 'Deleting 1 of 3 themes…');
-    expect(countText()).toBe('Deleting 1 of 3 themes…');
+    await waitUntil(() => !toolbarVisible());
+
+    expect(requestedNames()).toEqual(NAMES);
+    expect(remaining()).toEqual([]);
+    expectIdle(0);
+    await waitUntil(() => toastTexts().at(-1) === 'Deleted 3 themes.');
+    expect(toastTexts().at(-1)).toBe('Deleted 3 themes.');
+  });
+
+  it('carries on past a theme Shopify refuses, keeping it selected with the reason in the summary', async () => {
+    select('Alpha', 'Beta', 'Gamma');
+    respondToDelete = (themeId) =>
+      Promise.resolve(themeId === idOf('Alpha') ? { ok: false, error: 'Theme is processing' } : { ok: true });
+
+    click(button('delete'));
+    await waitUntil(() => countText() === 'Delete 1 theme');
+
+    expect(requestedNames()).toEqual(NAMES);
+    expect(remaining()).toEqual(['Alpha']);
+    expect(checkedNames()).toEqual(['Alpha']);
+    expectIdle(1);
+    await waitUntil(() => toastTexts().at(-1)?.startsWith('Deleted 2') ?? false);
+    expect(toastTexts().at(-1)).toBe("Deleted 2 themes, couldn't delete Alpha (Theme is processing).");
+  });
+
+  it("counts a theme as failed when the admin page can't be reached", async () => {
+    select('Beta');
+    respondToDelete = () => Promise.reject(new Error('Could not establish connection'));
+
+    click(button('delete'));
+    await waitUntil(() => toastTexts().at(-1)?.startsWith('Deleted 0') ?? false);
+
+    expect(remaining()).toEqual(NAMES);
+    expectIdle(1);
+    expect(toastTexts().at(-1)).toBe("Deleted 0 themes, couldn't delete Beta (Could not establish connection).");
+  });
+
+  it('shows progress and ignores checkbox changes while a delete is running', async () => {
+    select('Alpha', 'Beta');
+    let finish = () => {};
+    respondToDelete = () => new Promise((resolve) => (finish = () => resolve({ ok: true })));
+
+    click(button('delete'));
+    await waitUntil(() => deleteRequests.length === 1);
+    expect(countText()).toBe('Deleting 1 of 2…');
     expect(button('cancel').textContent).toBe('Stop');
     expect(button('delete').hasAttribute('disabled')).toBe(true);
     expect(checkboxOf('Gamma').hasAttribute('disabled')).toBe(true);
 
-    await answerDialog('Alpha', 'Cancel');
-    await answerDialog('Beta', 'Delete theme');
-    await answerDialog('Gamma', 'Delete theme');
-    await waitUntil(() => countText() === '1 theme selected');
-
-    expect(remaining()).toEqual(['Alpha']);
-    expect(checkedNames()).toEqual(['Alpha']);
-    expect(checkboxOf('Alpha').hasAttribute('disabled')).toBe(false);
-    expectIdle(1);
-    await waitUntil(() => toastTexts().at(-1) === 'Deleted 2 themes, skipped 1 you canceled.');
-    expect(toastTexts().at(-1)).toBe('Deleted 2 themes, skipped 1 you canceled.');
-  }, 10000);
-
-  it('ignores checkbox changes while a delete is running', async () => {
-    select('Alpha', 'Beta');
-    stubMenu('Alpha', 'dialog');
-    stubMenu('Beta', 'immediate');
-
-    click(button('delete'));
-    await waitUntil(() => !!document.querySelector('[role="dialog"]'));
     toggleCheckbox(checkboxOf('Beta'), false);
     toggleCheckbox(checkboxOf('Gamma'), true);
-
     expect(checkedNames()).toEqual(['Alpha', 'Beta']);
-    await answerDialog('Alpha', 'Delete theme');
+
+    finish();
+    await waitUntil(() => deleteRequests.length === 2);
+    finish();
     await waitUntil(() => !toolbarVisible());
 
     expect(remaining()).toEqual(['Gamma']);
     expectIdle(0);
-  }, 10000);
+  });
 
   it('Stop ends the run after the current theme and keeps the rest selected', async () => {
     select('Alpha', 'Beta', 'Gamma');
-    NAMES.forEach((name) => stubMenu(name, 'dialog'));
+    let finish = () => {};
+    respondToDelete = () => new Promise((resolve) => (finish = () => resolve({ ok: true })));
 
     click(button('delete'));
-    await waitUntil(() => !!document.querySelector('[role="dialog"]'));
+    await waitUntil(() => deleteRequests.length === 1);
     click(button('cancel'));
     expect(button('cancel').textContent).toBe('Stopping…');
     expect(button('cancel').hasAttribute('disabled')).toBe(true);
 
-    await answerDialog('Alpha', 'Delete theme');
-    await waitUntil(() => countText() === '2 themes selected');
+    finish();
+    await waitUntil(() => countText() === 'Delete 2 themes');
 
+    expect(requestedNames()).toEqual(['Alpha']);
     expect(remaining()).toEqual(['Beta', 'Gamma']);
     expect(checkedNames()).toEqual(['Beta', 'Gamma']);
     expectIdle(2);
     await waitUntil(() => toastTexts().at(-1) === 'Deleted 1 theme, stopped before 2.');
     expect(toastTexts().at(-1)).toBe('Deleted 1 theme, stopped before 2.');
-  }, 10000);
+  });
 
-  it('treats a theme as deleted when Shopify removes it immediately, with no confirmation dialog', async () => {
-    // Some themes (seen for drafts) delete immediately from the menu with no second dialog.
+  it('keeps a deleted theme hidden and unselectable when React renders its card again', async () => {
     select('Alpha');
-    stubMenu('Alpha', 'immediate');
-
     click(button('delete'));
     await waitUntil(() => !toolbarVisible());
 
+    // Shopify's list still has the theme until it reloads its data, so a re-render brings it back.
+    card('Alpha')!.outerHTML = themeItem(idOf('Alpha'), 'Alpha', 'editor');
+    injectIntoThemeList();
+
     expect(remaining()).toEqual(['Beta', 'Gamma']);
-    expectIdle(0);
+    click(button('select-all'));
+    expect(countText()).toBe('Delete 2 themes');
   });
 
   it('works again after a completed delete without a reload: select, cancel, delete', async () => {
     select('Alpha');
-    stubMenu('Alpha', 'immediate');
     click(button('delete'));
     await waitUntil(() => !toolbarVisible());
     expect(remaining()).toEqual(['Beta', 'Gamma']);
@@ -472,10 +552,10 @@ describe('bulk delete', () => {
     expectIdle(0);
 
     select('Gamma');
-    stubMenu('Gamma', 'immediate');
     click(button('delete'));
     await waitUntil(() => !toolbarVisible());
     expect(remaining()).toEqual(['Beta']);
+    expect(requestedNames()).toEqual(['Alpha', 'Gamma']);
     expectIdle(0);
   });
 });

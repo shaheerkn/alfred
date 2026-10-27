@@ -3,21 +3,15 @@ import { getSettings, isEnabled } from '~/utils/settings';
 import { sendTrackEvent } from '~/utils/analytics';
 import type { AnalyticsAction } from '~/utils/analytics-actions';
 import { Toast } from '~/utils/toast';
+import { sendRuntimeMessage, type ThemeDeleteResponse } from '~/utils/messages';
 
 const INJECTED_ATTR = 'data-alfred-theme-list';
 const CHECKBOX_ATTR = 'data-alfred-theme-checkbox';
 const TOOLBAR_ATTR = 'data-alfred-bulk-toolbar';
 const THEMES_PATH = /\/themes\/?$/;
-const DELETE_TEXT = /delete/i;
-const CANCEL_TEXT = /cancel/i;
-const DIALOG_SELECTOR = 'dialog[open], [role="dialog"], [role="alertdialog"]';
-
-/** How long a confirmed delete gets to actually remove the theme (the mutation's round trip). */
-const REMOVAL_TIMEOUT = 20000;
-/** After a cancel, how long to still watch for the theme going, in case the answer was misread. */
-const CANCEL_GRACE = 1500;
-/** How long to wait for the user to answer Shopify's dialog before giving up on the whole run. */
-const ANSWER_TIMEOUT = 5 * 60 * 1000;
+const DELETED_ATTR = 'data-alfred-deleted';
+/** The theme library header's Import/New button group, on stores that have New. See `findThemeActions`. */
+const THEME_ACTIONS_SELECTOR = '[role="group"][aria-label="Theme actions"]';
 
 /**
  * Layout for the injected copy row, checkboxes and bulk-delete toolbar. The actions row is
@@ -65,66 +59,38 @@ const STYLES = `
       display: none;
     }
   }
-  [${CHECKBOX_ATTR}] {
-    margin-inline-end: var(--p-space-100);
+  /* The checkbox sits before the card's thumbnail/details grid, which takes the remaining width. */
+  :has(> [${CHECKBOX_ATTR}]) {
+    display: flex;
+    align-items: center;
+    gap: var(--p-space-300);
+  }
+  :has(> [${CHECKBOX_ATTR}]) > .Polaris-InlineGrid {
+    flex: 1;
+    min-width: 0;
+  }
+  [${DELETED_ATTR}] {
+    display: none !important;
+  }
+  /* Shopify's group is nowrap; on narrow screens the toolbar would push Import and New off the
+     edge, so it wraps onto its own line instead. */
+  .Polaris-InlineStack:has(> [${TOOLBAR_ATTR}]) {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   [${TOOLBAR_ATTR}] {
-    /* Resets the UA stylesheet's defaults for [popover] (inset: 0, border: solid, margin: auto,
-       color-scheme-based background), which would otherwise fight with the rules below. */
-    inset: auto;
-    margin: 0;
-    border: none;
-    color: inherit;
-    position: fixed;
-    /* admin.shopify.com's own title bar (_AppTitleBarContainer) lives outside this iframe, so no
-       z-index or top-layer trick here can ever render above it -- content can't escape its own
-       iframe's box. Clearing its height is the only fix available from inside the iframe. */
-    top: 72px;
-    left: 50%;
-    z-index: 2147483647;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
+    display: none;
     align-items: center;
     gap: var(--p-space-200);
-    box-sizing: border-box;
-    width: 100%;
-    max-width: 600px;
-    padding: var(--p-space-200) var(--p-space-300);
-    background: var(--p-color-bg-surface, #fff);
-    border-radius: var(--p-border-radius-300, 12px);
-    box-shadow:
-      0 8px 24px rgba(0, 0, 0, 0.16),
-      0 2px 6px rgba(0, 0, 0, 0.08);
-    transform: translate(-50%, -12px);
-    opacity: 0;
-    visibility: hidden;
-    transition:
-      opacity 180ms ease,
-      transform 180ms ease,
-      visibility 0s linear 180ms;
   }
   [${TOOLBAR_ATTR}].alfred-bulk-toolbar--show {
-    transform: translate(-50%, 0);
-    opacity: 1;
-    visibility: visible;
-    transition:
-      opacity 180ms ease,
-      transform 180ms ease;
+    display: flex;
   }
-  [${TOOLBAR_ATTR}] > .alfred-bulk-toolbar__count {
-    font-weight: 600;
-    white-space: nowrap;
-    /* Fixed, with room for the longest realistic text ("Deleting 12 of 15 themes…"), so the
-       buttons don't shift as the count's digits or wording change. */
-    width: 250px;
-    text-align: left;
-  }
-  /* Fixed to fit "Deselect all", so the buttons don't shift when it swaps with "Select all". */
-  [${TOOLBAR_ATTR}] > [data-action="select-all"] {
+  /* Fixed so the buttons don't shift as the count and progress in its text change. */
+  [${TOOLBAR_ATTR}] > [data-action="delete"] {
     display: inline-flex;
     justify-content: center;
-    width: 110px;
+    width: 124px;
   }
 `;
 
@@ -323,6 +289,21 @@ let progress: { current: number; total: number } | null = null;
 /** Set by the toolbar's "Stop" button to end a running bulk delete after the current theme. */
 let stopRequested = false;
 
+/**
+ * Themes Alfred deleted through the API. Shopify's list doesn't know they're gone until it next
+ * loads its data, so their cards are hidden in the meantime.
+ */
+const deletedThemeIds = new Set<string>();
+
+/** Hides the cards of themes Alfred deleted, including ones React has rendered again. */
+const hideDeletedThemes = () => {
+  for (const theme of collectThemeElements()) {
+    if (deletedThemeIds.has(theme.themeId) && !theme.card.hasAttribute(DELETED_ATTR)) {
+      theme.card.setAttribute(DELETED_ATTR, '');
+    }
+  }
+};
+
 const themeCount = (n: number) => `${n} theme${n === 1 ? '' : 's'}`;
 
 /**
@@ -339,10 +320,10 @@ const setText = (el: Element | null, text: string) => {
   }
 };
 
-/** Library themes on the page that can be selected: every theme but the live one. */
+/** Library themes on the page that can be selected: every theme but the live one and deleted ones. */
 const eligibleThemeIds = () =>
   collectThemeElements()
-    .filter((theme) => !theme.isPublished)
+    .filter((theme) => !theme.isPublished && !deletedThemeIds.has(theme.themeId))
     .map((theme) => theme.themeId);
 
 /**
@@ -360,11 +341,36 @@ const syncCheckboxes = () => {
   });
 };
 
+/** Shared by every fixed-width toolbar button's shadow root; created on first use. */
+let fillButtonSheet: CSSStyleSheet | null = null;
+
 /**
- * Shows or hides the floating bulk-delete toolbar and refreshes its text and buttons, and syncs
- * the checkboxes. While a delete runs it shows progress, disables "Select all" and "Delete
- * selected", and turns "Cancel" into "Stop". Visibility is a CSS class, not the `hidden`
- * attribute, so the show/hide transition can animate instead of snapping.
+ * Stretches the real `<button>` inside the fixed-width toolbar buttons to their full width, so
+ * the whole width is filled and clickable. It lives in `s-internal-button`'s shadow root, which
+ * page CSS can't reach, so the rule is adopted into that root; `!important` beats the
+ * component's own sizing of `.button`. Runs on every toolbar update, since a shadow root can
+ * attach after the toolbar is inserted, and skips roots that already have the rule. Adopting a
+ * sheet isn't a DOM mutation, so it can't retrigger the observer.
+ * @param toolbar - The bulk-delete toolbar.
+ */
+const fillFixedWidthButtons = (toolbar: HTMLElement) => {
+  for (const button of toolbar.querySelectorAll('[data-action="delete"]')) {
+    const root = button.shadowRoot;
+    if (!root || (fillButtonSheet && root.adoptedStyleSheets.includes(fillButtonSheet))) {
+      continue;
+    }
+    if (!fillButtonSheet) {
+      fillButtonSheet = new CSSStyleSheet();
+      fillButtonSheet.replaceSync('button.button { width: 100% !important; inline-size: 100% !important; }');
+    }
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, fillButtonSheet];
+  }
+};
+
+/**
+ * Shows or hides the bulk-delete toolbar, refreshes its buttons and syncs the checkboxes. The
+ * delete button carries the count ("Delete 3 themes"), and progress while a delete runs
+ * ("Deleting 2 of 3…"), when it and "Select all" are disabled and "Cancel" turns into "Stop".
  */
 const updateToolbar = () => {
   syncCheckboxes();
@@ -376,24 +382,22 @@ const updateToolbar = () => {
 
   const count = selectedThemeIds.size;
   toolbar.classList.toggle('alfred-bulk-toolbar--show', count > 0 || !!progress);
-
-  setText(
-    toolbar.querySelector('.alfred-bulk-toolbar__count'),
-    progress ? `Deleting ${progress.current} of ${themeCount(progress.total)}…` : `${themeCount(count)} selected`
-  );
+  fillFixedWidthButtons(toolbar);
 
   const eligible = eligibleThemeIds();
   const allSelected = eligible.length > 0 && eligible.every((id) => selectedThemeIds.has(id));
-  const buttons: [string, string | null, boolean][] = [
+  const buttons: [string, string, boolean][] = [
     ['select-all', allSelected ? 'Deselect all' : 'Select all', !!progress],
     ['cancel', progress ? (stopRequested ? 'Stopping…' : 'Stop') : 'Cancel', !!progress && stopRequested],
-    ['delete', null, !!progress]
+    [
+      'delete',
+      progress ? `Deleting ${progress.current} of ${progress.total}…` : `Delete ${themeCount(count)}`,
+      !!progress
+    ]
   ];
   for (const [action, text, disabled] of buttons) {
     const button = toolbar.querySelector(`[data-action="${action}"]`);
-    if (text !== null) {
-      setText(button, text);
-    }
+    setText(button, text);
     if (button && button.hasAttribute('disabled') !== disabled) {
       button.toggleAttribute('disabled', disabled);
     }
@@ -422,7 +426,7 @@ const handleCheckboxChange = (themeId: string, checked: boolean) => {
 };
 
 /**
- * Adds a selection checkbox beside each library theme's name, skipping the live theme (Shopify
+ * Adds a selection checkbox before each library theme's thumbnail, skipping the live theme (Shopify
  * doesn't allow deleting the published theme). Checked state comes from `selectedThemeIds` via
  * {@link syncCheckboxes}, so it survives React re-rendering the row away and Alfred re-adding it.
  *
@@ -430,7 +434,7 @@ const handleCheckboxChange = (themeId: string, checked: boolean) => {
  * publicly at shopify.dev/docs/api/checkout-ui-extensions/.../forms/checkbox) rather than a
  * hand-styled `<input>`, so it matches Shopify's own checkbox design for free. `accessibilitylabel`
  * (not `label`) gives it a screen-reader-only label, since the theme's name is already visible
- * right next to it. State goes through its real inner `<input>` (see {@link checkboxInput}), and
+ * in the same row. State goes through its real inner `<input>` (see {@link checkboxInput}), and
  * only after it's inserted into the document, since that's when its shadow root attaches.
  * @param themes - Themes found on the current render pass.
  * @returns `true` if at least one theme got a new checkbox.
@@ -443,9 +447,10 @@ const injectCheckboxes = (themes: ThemeElements[]): boolean => {
       continue;
     }
 
-    const heading = theme.card.querySelector('h3');
-    const nameStack = heading?.closest('.Polaris-InlineStack');
-    if (!nameStack || nameStack.querySelector(`[${CHECKBOX_ATTR}]`)) {
+    // The card's grid holds the thumbnail and the details as columns; the checkbox goes in the
+    // grid's parent, ahead of it, so it doesn't take a column (laid out by `STYLES`).
+    const row = theme.card.querySelector('.Polaris-InlineGrid')?.parentElement;
+    if (!row || row.querySelector(`:scope > [${CHECKBOX_ATTR}]`)) {
       continue;
     }
 
@@ -457,7 +462,7 @@ const injectCheckboxes = (themes: ThemeElements[]): boolean => {
       handleCheckboxChange(theme.themeId, isCheckboxChecked(checkbox));
     });
 
-    nameStack.prepend(checkbox);
+    row.prepend(checkbox);
     injected = true;
   }
 
@@ -522,24 +527,28 @@ const handleCancelClick = () => {
 };
 
 /**
- * Adds the floating bulk-delete toolbar (fixed to the top center of the iframe's own viewport)
- * if it isn't already there (React re-renders can remove it, same as the per-theme injections).
- * It's a direct child of `<body>`, not anchored near the list: being `position: fixed`, where
- * it sits in the DOM doesn't affect where it renders, and `<body>` sidesteps the manual slot
- * assignment on `<s-internal-section>` (see the theme-list-placement test) for good.
- *
- * It also opens as a `popover="manual"`, the same mechanism {@link Toast} uses, which promotes
- * it into the browser's top layer: rendered above *all* regular content in this document
- * regardless of any ancestor's z-index, stacking context, `overflow`, or `transform` —
- * including Shopify's own `s-popover`/`s-modal` elements, which are top-layer themselves, so a
- * merely-high z-index on a regular element can still lose to them. `showPopover()` is called
- * once, right here, and never again: afterwards visibility is purely the `--show` class below,
- * so repeat calls (which the Popover API throws on if already open) never happen.
- *
- * "This document" is the operative limit: admin.shopify.com's own title bar lives outside this
- * iframe, in the parent frame, which no amount of z-index or top-layer promotion in here can
- * ever render above — an iframe's content can't paint outside its own box. `STYLES`' `top`
- * offset on this toolbar instead just clears the title bar's height so the two don't overlap.
+ * The theme library header's button row holding Import (and New, where the store has it), which
+ * the toolbar goes at the start of. Stores with New wrap both in a "Theme actions" group; stores
+ * without it have no group, and Import sits straight in the header's button row. Either way the
+ * row is the nearest `InlineStack` around Import, or around New (the only button with a plus
+ * icon) if Import's label is translated.
+ */
+const findThemeActions = () => {
+  const group = document.querySelector(THEME_ACTIONS_SELECTOR);
+  if (group) {
+    return group;
+  }
+  const button =
+    document.querySelector('s-internal-button[accessibilitylabel="Import themes"]') ??
+    document.querySelector('s-internal-button[icon="plus"]');
+  return button?.closest('.Polaris-InlineStack') ?? null;
+};
+
+/**
+ * Adds the bulk-delete toolbar to the theme library's header, just before Import and New, if it
+ * isn't already there (React re-renders can remove it, same as the per-theme injections). Its
+ * state lives in module variables, so a re-added toolbar picks up where the old one left off,
+ * even mid-delete.
  */
 const injectBulkToolbar = () => {
   if (document.querySelector(`[${TOOLBAR_ATTR}]`)) {
@@ -547,246 +556,58 @@ const injectBulkToolbar = () => {
     return;
   }
 
-  if (!document.querySelector('ul[class*="ThemeList"]')) {
+  const actions = findThemeActions();
+  if (!actions || !document.querySelector('ul[class*="ThemeList"]')) {
     return;
   }
 
   const toolbar = html(`
-    <div ${TOOLBAR_ATTR} popover="manual">
-      <span class="alfred-bulk-toolbar__count"></span>
-      <s-internal-button variant="tertiary" data-action="select-all">Select all</s-internal-button>
-      <s-internal-button variant="tertiary" data-action="cancel">Cancel</s-internal-button>
-      <s-internal-button variant="primary" data-action="delete">Delete selected</s-internal-button>
+    <div ${TOOLBAR_ATTR}>
+      <s-internal-button variant="secondary" data-action="select-all">Select all</s-internal-button>
+      <s-internal-button variant="secondary" data-action="cancel">Cancel</s-internal-button>
+      <s-internal-button variant="secondary" data-action="delete">Delete</s-internal-button>
     </div>
   `);
   toolbar.querySelector('[data-action="select-all"]')?.addEventListener('click', handleSelectAllClick);
   toolbar.querySelector('[data-action="cancel"]')?.addEventListener('click', handleCancelClick);
   toolbar.querySelector('[data-action="delete"]')?.addEventListener('click', () => void confirmAndDeleteSelected());
 
-  document.body.append(toolbar);
-  toolbar.showPopover?.();
+  actions.prepend(toolbar);
   updateToolbar();
 };
 
 /**
- * Waits for `check` to return a truthy value, polling every `interval` ms up to `timeout` ms.
- * Used to wait out Shopify's own async rendering (popovers, modals, list updates) since there's
- * no event to subscribe to for any of them.
- * @param check - Returns the found value, or a falsy value to keep waiting.
- * @param options - `timeout` and poll `interval` in milliseconds.
- * @returns The found value, or `null` if `timeout` elapsed first.
+ * Deletes one theme through Shopify's own admin API. The request needs the admin's session and
+ * CSRF token, which this iframe doesn't have, so the background relays it to the admin page in
+ * the same tab (shopify-admin.content/theme-delete.ts), which sends it.
+ * @param themeId - The theme to delete.
+ * @returns Whether Shopify deleted it, and why not if it didn't.
  */
-const waitFor = async <T>(
-  check: () => T | null | undefined | false,
-  { timeout = 3000, interval = 50 }: { timeout?: number; interval?: number } = {}
-): Promise<T | null> => {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    const result = check();
-    if (result) {
-      return result;
-    }
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  return null;
-};
-
-/**
- * Finds the "Delete" item in a theme's "more actions" popover. Shopify marks it with
- * `Polaris-ActionList--destructive` (it's the only destructive item in that menu), which is
- * tried first; falling back to matching its visible text in case that class ever changes.
- * @param popoverId - The `id` of the `s-popover` opened by the theme's "more actions" button.
- */
-const findPopoverDeleteItem = (popoverId: string): HTMLElement | null => {
-  const popover = document.getElementById(popoverId);
-  if (!popover) {
-    return null;
-  }
-
-  const destructive = popover.querySelector<HTMLElement>('.Polaris-ActionList--destructive');
-  if (destructive) {
-    return destructive;
-  }
-
-  for (const item of popover.querySelectorAll<HTMLElement>('a, button')) {
-    if (DELETE_TEXT.test(item.textContent ?? '')) {
-      return item;
-    }
-  }
-  return null;
-};
-
-/**
- * Finds Shopify's open delete-confirmation dialog, if it's in this frame: a `<dialog open>` or
- * `[role="dialog"]`/`[role="alertdialog"]` that mentions "delete", including one rendered inside
- * an `s-modal`'s open shadow root. The theme's own "more actions" popover also says "Delete", so
- * it's excluded.
- * @param exclude - The theme's "more actions" popover.
- */
-const findOpenDialog = (exclude: Element | null): HTMLElement | null => {
-  const candidates = [...document.querySelectorAll<HTMLElement>(DIALOG_SELECTOR)];
-  for (const modal of document.querySelectorAll<HTMLElement>('s-modal, s-internal-modal')) {
-    if (modal.shadowRoot?.querySelector('dialog[open]')) {
-      candidates.push(modal);
-    }
-  }
-
-  return (
-    candidates.find(
-      (dialog) =>
-        !exclude?.contains(dialog) &&
-        !dialog.hidden &&
-        dialog.getAttribute('aria-hidden') !== 'true' &&
-        DELETE_TEXT.test(`${dialog.textContent ?? ''} ${dialog.shadowRoot?.textContent ?? ''}`)
-    ) ?? null
-  );
-};
-
-/**
- * Records which way the user answers Shopify's confirmation dialog, without touching it: a click
- * on a "Delete" button inside it is a confirm, any other button in it (Cancel, the close X) or
- * Escape is a cancel. Listens in the capture phase so it sees the click before Shopify's own
- * handler closes the dialog.
- * @param dialog - The open dialog from {@link findOpenDialog}.
- * @returns The answer so far (`null` until one is seen), and a function to stop listening.
- */
-const watchDialogAnswer = (dialog: HTMLElement) => {
-  let answer: 'confirm' | 'cancel' | null = null;
-
-  const onClick = (e: Event) => {
-    const path = e.composedPath();
-    if (!path.includes(dialog)) {
-      return;
-    }
-    const button = path.find(
-      (node): node is HTMLElement =>
-        node instanceof HTMLElement && node.matches('button, [role="button"], s-button, s-internal-button')
-    );
-    if (!button) {
-      return;
-    }
-    const text = `${button.textContent ?? ''} ${button.getAttribute('aria-label') ?? ''}`;
-    answer = DELETE_TEXT.test(text) && !CANCEL_TEXT.test(text) ? 'confirm' : 'cancel';
-  };
-  const onKeydown = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      answer = 'cancel';
-    }
-  };
-
-  document.addEventListener('click', onClick, true);
-  document.addEventListener('keydown', onKeydown, true);
-
-  return {
-    answer: () => answer,
-    stop: () => {
-      document.removeEventListener('click', onClick, true);
-      document.removeEventListener('keydown', onKeydown, true);
-    }
-  };
-};
-
-/** How one theme's delete ended: removed, canceled by the user in Shopify's dialog, or failed. */
-type DeleteOutcome = { status: 'deleted' } | { status: 'canceled' } | { status: 'failed'; reason: string };
-
-const DELETED: DeleteOutcome = { status: 'deleted' };
-const CANCELED: DeleteOutcome = { status: 'canceled' };
-const failed = (reason: string): DeleteOutcome => ({ status: 'failed', reason });
-
-/**
- * Whether a theme is no longer in the list. Checked by ID, freshly, rather than against a
- * captured node: an unrelated re-render can replace a theme's whole subtree with an equivalent
- * node, which a reference-identity check would report as "not removed". Off the themes page
- * every theme is "missing", so nothing counts as gone there.
- * @param themeId - The theme to look for.
- */
-const isGone = (themeId: string) =>
-  THEMES_PATH.test(window.location.pathname) && !collectThemeElements().some((t) => t.themeId === themeId);
-
-/**
- * Deletes one theme by driving Shopify's own UI: opens its "more actions" popover and clicks
- * "Delete". Shopify then either deletes it straight away (seen for drafts) or asks first. Its
- * confirmation is left entirely to the user: Alfred never clicks it, only watches for the dialog
- * to close and which button closed it, then checks whether the theme actually went.
- * @param theme - The theme to delete, as collected by {@link collectThemeElements}.
- * @returns How it ended. Never rejects on a cancel and never waits forever for an answer.
- */
-const deleteOneTheme = async (theme: ThemeElements): Promise<DeleteOutcome> => {
-  const popoverId = theme.more?.getAttribute('commandfor');
-  if (!theme.more || !popoverId) {
-    return failed("Couldn't find the actions menu");
-  }
-
-  theme.more.click();
-
-  const deleteItem = await waitFor(() => findPopoverDeleteItem(popoverId));
-  if (!deleteItem) {
-    theme.more.click(); // best-effort: close the popover we opened
-    return failed("Couldn't find a delete option in the menu");
-  }
-  const popover = document.getElementById(popoverId);
-
-  // A browser-native confirm() blocks inside click() until it's answered, so a click that takes
-  // this long means one was shown. Which button was pressed can't be read back from it, so the
-  // theme disappearing is the only signal: if it hasn't by the deadline, that was a cancel.
-  const clickedAt = Date.now();
-  deleteItem.click();
-  if (Date.now() - clickedAt > 250) {
-    return (await waitFor(() => isGone(theme.themeId), { timeout: REMOVAL_TIMEOUT })) ? DELETED : CANCELED;
-  }
-
-  const first = await waitFor(() => (isGone(theme.themeId) ? 'deleted' : findOpenDialog(popover)), {
-    timeout: REMOVAL_TIMEOUT
-  });
-  if (first === 'deleted') {
-    return DELETED;
-  }
-  if (!first) {
-    return failed("It wasn't removed, and no confirmation dialog showed up in the theme list");
-  }
-
-  const watcher = watchDialogAnswer(first);
+const deleteOneTheme = async (themeId: string): Promise<ThemeDeleteResponse> => {
   try {
-    const settled = await waitFor(
-      () => (isGone(theme.themeId) ? 'deleted' : !findOpenDialog(popover) ? 'closed' : null),
-      { timeout: ANSWER_TIMEOUT, interval: 100 }
-    );
-    if (settled === 'deleted') {
-      return DELETED;
-    }
-    if (!settled) {
-      // Carrying on would click the next theme's menu behind a dialog that's still open.
-      stopRequested = true;
-      return failed("Shopify's confirmation was left unanswered");
-    }
-
-    const confirmed = watcher.answer() === 'confirm';
-    const gone = await waitFor(() => isGone(theme.themeId), { timeout: confirmed ? REMOVAL_TIMEOUT : CANCEL_GRACE });
-    if (gone) {
-      return DELETED;
-    }
-    return confirmed ? failed('It was still there after confirming') : CANCELED;
-  } finally {
-    watcher.stop();
+    const response = (await sendRuntimeMessage({ type: 'delete_theme', themeId })) as ThemeDeleteResponse | undefined;
+    return response ?? { ok: false, error: 'The admin page gave no answer. Reload it and try again' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 };
 
 interface BulkDeleteResult {
   deleted: string[];
-  canceled: string[];
   failed: { id: string; name: string; reason: string }[];
   /** Themes never reached because the run was stopped. */
   stopped: string[];
 }
 
 /**
- * Deletes each theme in turn, one at a time to avoid racing Shopify's own popovers and modals.
- * Each theme is independent: a cancel, failure or thrown error on one moves on to the next.
- * Deleted themes leave the selection; canceled, failed and stopped ones stay selected to retry.
+ * Deletes each theme in turn, so "Stop" takes effect between themes and progress stays accurate.
+ * Each theme is independent: a failure on one moves on to the next. Deleted themes leave the
+ * selection and are hidden from the list; failed and stopped ones stay selected to retry.
  * @param ids - Theme IDs to delete.
+ * @param names - Theme names by ID, for the summary.
  */
-const deleteThemes = async (ids: string[]): Promise<BulkDeleteResult> => {
-  const result: BulkDeleteResult = { deleted: [], canceled: [], failed: [], stopped: [] };
+const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<BulkDeleteResult> => {
+  const result: BulkDeleteResult = { deleted: [], failed: [], stopped: [] };
 
   for (const [index, id] of ids.entries()) {
     if (stopRequested) {
@@ -797,37 +618,16 @@ const deleteThemes = async (ids: string[]): Promise<BulkDeleteResult> => {
     progress = { current: index + 1, total: ids.length };
     updateToolbar();
 
-    const theme = await waitFor(() => collectThemeElements().find((t) => t.themeId === id), { timeout: 1000 });
-    let outcome: DeleteOutcome;
-    try {
-      // Selected themes come from the list, so one missing from it has already been deleted.
-      outcome = theme ? await deleteOneTheme(theme) : isGone(id) ? DELETED : failed('The theme list went away');
-    } catch (error) {
-      outcome = failed(error instanceof Error ? error.message : String(error));
-    }
-
-    if (outcome.status === 'deleted') {
+    const response = await deleteOneTheme(id);
+    if (response.ok) {
       result.deleted.push(id);
       selectedThemeIds.delete(id);
-    } else if (outcome.status === 'canceled') {
-      result.canceled.push(id);
+      deletedThemeIds.add(id);
+      hideDeletedThemes();
     } else {
-      const name = theme?.name ?? id;
-      console.warn(`Alfred: couldn't bulk-delete theme "${name}" (${id}): ${outcome.reason}`);
-      result.failed.push({ id, name, reason: outcome.reason });
-    }
-
-    // Lets Shopify's own UI settle (popover/modal close animations) before the next theme.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-
-  // A slow delete can land after its theme was given up on; count it as what it turned out to be.
-  for (const id of [...result.canceled, ...result.failed.map((f) => f.id)]) {
-    if (isGone(id)) {
-      result.canceled = result.canceled.filter((c) => c !== id);
-      result.failed = result.failed.filter((f) => f.id !== id);
-      result.deleted.push(id);
-      selectedThemeIds.delete(id);
+      const name = names.get(id) ?? id;
+      console.warn(`Alfred: couldn't bulk-delete theme "${name}" (${id}): ${response.error}`);
+      result.failed.push({ id, name, reason: response.error });
     }
   }
 
@@ -835,27 +635,28 @@ const deleteThemes = async (ids: string[]): Promise<BulkDeleteResult> => {
 };
 
 /**
- * Sums up a bulk delete for the toast, e.g. "Deleted 3 themes, skipped 2 you canceled."
+ * Sums up a bulk delete for the toast, e.g. "Deleted 3 themes, couldn't delete Horizon (reason)."
  * @param result - What {@link deleteThemes} returned.
  */
-const summarizeBulkDelete = ({ deleted, canceled, failed, stopped }: BulkDeleteResult) => {
+const summarizeBulkDelete = ({ deleted, failed, stopped }: BulkDeleteResult) => {
   const parts = [`Deleted ${themeCount(deleted.length)}`];
-  if (canceled.length > 0) {
-    parts.push(`skipped ${canceled.length} you canceled`);
-  }
   if (stopped.length > 0) {
     parts.push(`stopped before ${stopped.length}`);
   }
   if (failed.length > 0) {
-    parts.push(`couldn't delete ${failed.map((f) => f.name).join(', ')}`);
+    parts.push(`couldn't delete ${failed.map((f) => `${f.name} (${f.reason})`).join(', ')}`);
   }
   return `${parts.join(', ')}.`;
 };
 
+/** The most theme names the confirmation lists before summing up the rest. */
+const CONFIRM_NAME_LIMIT = 10;
+
 /**
  * Confirms, then deletes every checked theme, reporting the outcome via a toast and tracking
- * how many were actually removed. The toolbar always leaves its "Deleting" state, however the
- * run ends.
+ * how many were actually removed. Shopify asks nothing further when deleting through its API,
+ * so the confirmation names every theme. The toolbar always leaves its "Deleting" state, however
+ * the run ends.
  */
 const confirmAndDeleteSelected = async () => {
   const ids = [...selectedThemeIds];
@@ -863,7 +664,12 @@ const confirmAndDeleteSelected = async () => {
     return;
   }
 
-  if (!confirm(`Delete ${themeCount(ids.length)}? Shopify may ask you to confirm each one. This can't be undone.`)) {
+  const names = new Map(collectThemeElements().map((theme) => [theme.themeId, theme.name]));
+  const listed = ids.slice(0, CONFIRM_NAME_LIMIT).map((id) => `• ${names.get(id) ?? id}`);
+  if (ids.length > CONFIRM_NAME_LIMIT) {
+    listed.push(`…and ${ids.length - CONFIRM_NAME_LIMIT} more`);
+  }
+  if (!confirm(`Permanently delete ${themeCount(ids.length)}? This can't be undone.\n\n${listed.join('\n')}`)) {
     return;
   }
 
@@ -873,7 +679,7 @@ const confirmAndDeleteSelected = async () => {
 
   let result: BulkDeleteResult;
   try {
-    result = await deleteThemes(ids);
+    result = await deleteThemes(ids, names);
   } finally {
     progress = null;
     stopRequested = false;
@@ -903,6 +709,7 @@ export const injectIntoThemeList = () => {
 
   const injected = injectCopyRows(themes);
   const checkboxesInjected = injectCheckboxes(themes);
+  hideDeletedThemes();
   pruneSelection();
   injectBulkToolbar();
 
@@ -930,7 +737,7 @@ export const setupThemeList = async (ctx: ContentScriptContext) => {
     if (!THEMES_PATH.test(pathname)) {
       observer?.disconnect();
       observer = undefined;
-      // The toolbar is fixed to <body>, so it would otherwise float over the next page.
+      // A selection made on this page shouldn't still be there on returning to it.
       if (progress) {
         stopRequested = true;
       } else {
@@ -961,7 +768,6 @@ export const setupThemeList = async (ctx: ContentScriptContext) => {
   ctx.onInvalidated(() => {
     observer?.disconnect();
     style.remove();
-    // Removing an open popover element closes it too, no separate hidePopover() needed.
     document.querySelector(`[${TOOLBAR_ATTR}]`)?.remove();
   });
 };
