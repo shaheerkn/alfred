@@ -151,6 +151,7 @@ class FakeCheckbox extends dom.HTMLElement {
 dom.customElements.define('s-checkbox', FakeCheckbox);
 
 const { injectIntoThemeList } = await import('../theme-list.util');
+const { removeBulkDelete } = await import('../theme-list-bulk-delete.util');
 
 afterAll(async () => {
   // Toast.show waits 100ms to add a toast while another is still showing; let any pending one
@@ -320,7 +321,8 @@ describe('bulk delete', () => {
   const list = () => document.querySelector('ul[class*="ThemeList"]')!;
   const card = (name: string) =>
     [...document.querySelectorAll('li')].find((li) => li.querySelector('h3')?.textContent === name);
-  const shown = (name: string) => !!card(name) && !card(name)!.hasAttribute('data-alfred-deleted');
+  // Deleted cards are hidden inline.
+  const shown = (name: string) => !!card(name) && card(name)!.style.display !== 'none';
   const checkboxOf = (name: string) => card(name)!.querySelector<HTMLElement>('[data-alfred-theme-checkbox]')!;
   const checkedNames = () => NAMES.filter((name) => shown(name) && shownChecked(checkboxOf(name)));
   const remaining = () => NAMES.filter(shown);
@@ -634,5 +636,17 @@ describe('bulk delete', () => {
     expect(remaining()).toEqual(['Beta']);
     expect(requestedNames()).toEqual(['Alpha', 'Gamma']);
     expectIdle(0);
+  });
+
+  it('removes its checkboxes, Select all and the toolbar when invalidated, keeping deleted themes hidden', async () => {
+    select('Alpha');
+    click(button('delete'));
+    await waitUntil(() => !toolbarVisible());
+
+    removeBulkDelete();
+
+    const leftovers = '[data-alfred-theme-checkbox], [data-alfred-select-all], [data-alfred-bulk-toolbar]';
+    expect(document.querySelectorAll(leftovers)).toHaveLength(0);
+    expect(remaining()).toEqual(['Beta', 'Gamma']);
   });
 });

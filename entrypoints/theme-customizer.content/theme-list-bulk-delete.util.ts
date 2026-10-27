@@ -7,11 +7,10 @@ import { collectThemeElements, html, THEMES_PATH, type ThemeElements } from './t
 const CHECKBOX_ATTR = 'data-alfred-theme-checkbox';
 const TOOLBAR_ATTR = 'data-alfred-bulk-toolbar';
 const SELECT_ALL_ATTR = 'data-alfred-select-all';
-const DELETED_ATTR = 'data-alfred-deleted';
 /** The theme library header's Import/New button group, on stores that have New. See `findThemeActions`. */
 const THEME_ACTIONS_SELECTOR = '[role="group"][aria-label="Theme actions"]';
 
-/** Layout for the selection checkboxes, "Select all" and the toolbar, and hides deleted themes' cards. */
+/** Layout for the selection checkboxes, "Select all" and the toolbar. */
 export const BULK_DELETE_STYLES = `
   /* The checkbox sits before the card's thumbnail/details grid, which takes the remaining width. */
   :has(> [${CHECKBOX_ATTR}]) {
@@ -22,9 +21,6 @@ export const BULK_DELETE_STYLES = `
   :has(> [${CHECKBOX_ATTR}]) > .Polaris-InlineGrid {
     flex: 1;
     min-width: 0;
-  }
-  [${DELETED_ATTR}] {
-    display: none !important;
   }
   [${TOOLBAR_ATTR}] {
     display: none;
@@ -119,11 +115,15 @@ let progress: { current: number; total: number } | null = null;
  */
 const deletedThemeIds = new Set<string>();
 
-/** Hides the cards of themes Alfred deleted, including ones React has rendered again. */
+/**
+ * Hides the cards of themes Alfred deleted, including ones React has rendered again. Hidden
+ * inline, so they stay hidden once the content script is invalidated and Alfred's stylesheet is
+ * removed.
+ */
 const hideDeletedThemes = () => {
   for (const theme of collectThemeElements()) {
-    if (deletedThemeIds.has(theme.themeId) && !theme.card.hasAttribute(DELETED_ATTR)) {
-      theme.card.setAttribute(DELETED_ATTR, '');
+    if (deletedThemeIds.has(theme.themeId) && theme.card.style.display !== 'none') {
+      theme.card.style.setProperty('display', 'none', 'important');
     }
   }
 };
@@ -583,8 +583,10 @@ export const injectBulkDelete = (themes: ThemeElements[]): boolean => {
   return injected;
 };
 
-/** Removes "Select all" and the toolbar, for when the content script is invalidated. */
+/**
+ * Removes the checkboxes, "Select all" and the toolbar, for when the content script is
+ * invalidated. Deleted themes' cards stay hidden until React renders them again.
+ */
 export const removeBulkDelete = () => {
-  document.querySelector(`[${TOOLBAR_ATTR}]`)?.remove();
-  document.querySelector(`[${SELECT_ALL_ATTR}]`)?.remove();
+  document.querySelectorAll(`[${CHECKBOX_ATTR}], [${TOOLBAR_ATTR}], [${SELECT_ALL_ATTR}]`).forEach((el) => el.remove());
 };
