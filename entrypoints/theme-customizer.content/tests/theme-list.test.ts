@@ -233,6 +233,25 @@ describe('injectIntoThemeList', () => {
     expect(checkboxes().every((checkbox) => checkbox.hasAttribute('accessibilitylabel'))).toBe(true);
   });
 
+  it("keeps a theme name with quotes and HTML as the checkbox's label text", () => {
+    const name = 'Summer "Sale"><img src=x onerror=alert(1)>';
+    const escaped = name
+      .replaceAll('&', '&amp;')
+      .replaceAll('"', '&quot;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+    const list = document.querySelector('ul[class*="ThemeList"]')!;
+    list.insertAdjacentHTML('beforeend', themeItem('177000000001', escaped, 'editor'));
+    const item = list.lastElementChild!;
+
+    injectIntoThemeList();
+
+    const checkbox = item.querySelector('[data-alfred-theme-checkbox]')!;
+    expect(checkbox.getAttribute('accessibilitylabel')).toBe(`Select ${name} for bulk delete`);
+    expect(item.querySelector('img')).toBeNull();
+    item.remove();
+  });
+
   it("puts each checkbox before the theme's thumbnail, outside its grid", () => {
     injectIntoThemeList();
 

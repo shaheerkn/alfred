@@ -289,9 +289,9 @@ const injectCheckboxes = (themes: ThemeElements[]): boolean => {
       continue;
     }
 
-    const checkbox = html(`
-      <s-checkbox ${CHECKBOX_ATTR} data-theme-id="${theme.themeId}" accessibilitylabel="Select ${theme.name} for bulk delete"></s-checkbox>
-    `);
+    const checkbox = html(`<s-checkbox ${CHECKBOX_ATTR} data-theme-id="${theme.themeId}"></s-checkbox>`);
+    // Set as an attribute, not in the markup: theme names can hold quotes and HTML.
+    checkbox.setAttribute('accessibilitylabel', `Select ${theme.name} for bulk delete`);
     checkbox.addEventListener('click', (e) => e.stopPropagation());
     checkbox.addEventListener('change', () => {
       handleCheckboxChange(theme.themeId, isCheckboxChecked(checkbox));
