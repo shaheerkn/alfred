@@ -118,9 +118,10 @@ const deletedThemeIds = new Set<string>();
  * Hides the cards of themes Alfred deleted, including ones React has rendered again. Hidden
  * inline, so they stay hidden once the content script is invalidated and Alfred's stylesheet is
  * removed.
+ * @param themes - Themes found on the current render pass; omit to scan the page.
  */
-const hideDeletedThemes = () => {
-  for (const theme of collectThemeElements()) {
+const hideDeletedThemes = (themes = collectThemeElements()) => {
+  for (const theme of themes) {
     if (deletedThemeIds.has(theme.themeId) && theme.card.style.display !== 'none') {
       theme.card.style.setProperty('display', 'none', 'important');
     }
@@ -143,11 +144,12 @@ const setText = (el: Element | null, text: string) => {
   }
 };
 
-/** Library themes on the page that can be selected: every theme but the live one and deleted ones. */
-const eligibleThemeIds = () =>
-  collectThemeElements()
-    .filter((theme) => !theme.isPublished && !deletedThemeIds.has(theme.themeId))
-    .map((theme) => theme.themeId);
+/**
+ * Library themes on the page that can be selected: every theme but the live one and deleted ones.
+ * @param themes - Themes found on the current render pass; omit to scan the page.
+ */
+const eligibleThemeIds = (themes = collectThemeElements()) =>
+  themes.filter((theme) => !theme.isPublished && !deletedThemeIds.has(theme.themeId)).map((theme) => theme.themeId);
 
 /**
  * Brings every checkbox in line with `selectedThemeIds`, and disables them while a bulk delete
@@ -194,13 +196,14 @@ const fillFixedWidthButtons = () => {
  * selection can start from it; it reads "Deselect all" once every theme is selected, and is
  * disabled while a delete runs or when there are no themes to select. Only writes what differs,
  * like the toolbar.
+ * @param themes - Themes found on the current render pass; omit to scan the page.
  */
-const updateSelectAll = () => {
+const updateSelectAll = (themes?: ThemeElements[]) => {
   const button = document.querySelector(`[${SELECT_ALL_ATTR}]`);
   if (!button) {
     return;
   }
-  const eligible = eligibleThemeIds();
+  const eligible = eligibleThemeIds(themes);
   const allSelected = eligible.length > 0 && eligible.every((id) => selectedThemeIds.has(id));
   setText(button, allSelected ? 'Deselect all' : 'Select all');
   const disabled = !!progress || eligible.length === 0;
@@ -213,10 +216,11 @@ const updateSelectAll = () => {
  * Shows or hides the bulk-delete toolbar, refreshes its buttons and "Select all", and syncs the
  * checkboxes. The delete button carries the count ("Delete 3 themes"), and progress while a
  * delete runs ("Deleting 2 of 3…"), when both toolbar buttons are disabled.
+ * @param themes - Themes found on the current render pass; omit to scan the page.
  */
-const updateToolbar = () => {
+const updateToolbar = (themes?: ThemeElements[]) => {
   syncCheckboxes();
-  updateSelectAll();
+  updateSelectAll(themes);
 
   const toolbar = document.querySelector<HTMLElement>(`[${TOOLBAR_ATTR}]`);
   if (!toolbar) {
@@ -310,12 +314,13 @@ const injectCheckboxes = (themes: ThemeElements[]): boolean => {
  * Drops selected themes that are no longer on the page (deleted from Shopify's own menu, say),
  * so the count never includes themes that can't be acted on. Skipped while a bulk delete runs,
  * which settles its own themes, and while the list isn't rendered at all.
+ * @param themes - Themes found on the current render pass.
  */
-const pruneSelection = () => {
+const pruneSelection = (themes: ThemeElements[]) => {
   if (progress || selectedThemeIds.size === 0 || !document.querySelector('ul[class*="ThemeList"]')) {
     return;
   }
-  const eligible = new Set(eligibleThemeIds());
+  const eligible = new Set(eligibleThemeIds(themes));
   for (const id of selectedThemeIds) {
     if (!eligible.has(id)) {
       selectedThemeIds.delete(id);
@@ -378,10 +383,11 @@ const findThemeActions = () => {
  * left of the header and Shopify's on the right. Delete comes first, then an icon-only button
  * that clears the selection. Its state lives in module variables, so a re-added toolbar picks
  * up where the old one left off, even mid-delete.
+ * @param themes - Themes found on the current render pass.
  */
-const injectBulkToolbar = () => {
+const injectBulkToolbar = (themes: ThemeElements[]) => {
   if (document.querySelector(`[${TOOLBAR_ATTR}]`)) {
-    updateToolbar();
+    updateToolbar(themes);
     return;
   }
 
@@ -400,15 +406,16 @@ const injectBulkToolbar = () => {
   toolbar.querySelector('[data-action="clear"]')?.addEventListener('click', clearSelection);
 
   selectAll.after(toolbar);
-  updateToolbar();
+  updateToolbar(themes);
 };
 
 /**
  * Adds "Select all" right after the theme library's heading ("Draft themes"), if it isn't there
  * already. The heading is the one in the same header as Import, found by walking up from its
  * button row.
+ * @param themes - Themes found on the current render pass.
  */
-const injectSelectAll = () => {
+const injectSelectAll = (themes: ThemeElements[]) => {
   if (document.querySelector(`[${SELECT_ALL_ATTR}]`)) {
     return;
   }
@@ -427,7 +434,7 @@ const injectSelectAll = () => {
   );
   button.addEventListener('click', handleSelectAllClick);
   heading.after(button);
-  updateSelectAll();
+  updateSelectAll(themes);
 };
 
 /**
@@ -575,10 +582,10 @@ const confirmAndDeleteSelected = async () => {
  */
 export const injectBulkDelete = (themes: ThemeElements[]): boolean => {
   const injected = injectCheckboxes(themes);
-  hideDeletedThemes();
-  pruneSelection();
-  injectSelectAll();
-  injectBulkToolbar();
+  hideDeletedThemes(themes);
+  pruneSelection(themes);
+  injectSelectAll(themes);
+  injectBulkToolbar(themes);
   return injected;
 };
 
