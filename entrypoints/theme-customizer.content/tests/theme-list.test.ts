@@ -152,6 +152,7 @@ dom.customElements.define('s-checkbox', FakeCheckbox);
 
 const { injectIntoThemeList } = await import('../theme-list.util');
 const { removeBulkDelete } = await import('../theme-list-bulk-delete.util');
+const ALL_FEATURES = { copyRows: true, bulkDelete: true };
 
 afterAll(async () => {
   // Toast.show waits 100ms to add a toast while another is still showing; let any pending one
@@ -188,7 +189,7 @@ describe('injectIntoThemeList', () => {
   beforeEach(() => document.querySelectorAll(ALFRED_SELECTOR).forEach((el) => el.remove()));
 
   it('adds ID and preview URL buttons below the live theme and each library theme, including Canvas themes', () => {
-    expect(injectIntoThemeList()).toBe(true);
+    expect(injectIntoThemeList(ALL_FEATURES)).toBe(true);
 
     const wrappers = injected();
     expect(wrappers.map(copyValues)).toEqual([
@@ -203,7 +204,7 @@ describe('injectIntoThemeList', () => {
   });
 
   it('renders tertiary Polaris buttons with clipboard icons, then an inert copy of the more-actions button', () => {
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     const row = injected()[0];
     const buttons = [...row.querySelectorAll('s-internal-button')];
@@ -218,16 +219,16 @@ describe('injectIntoThemeList', () => {
   });
 
   it('skips injected items and restores buttons React re-rendered away', () => {
-    injectIntoThemeList();
-    expect(injectIntoThemeList()).toBe(false);
+    injectIntoThemeList(ALL_FEATURES);
+    expect(injectIntoThemeList(ALL_FEATURES)).toBe(false);
 
     injected()[0].remove();
-    expect(injectIntoThemeList()).toBe(true);
+    expect(injectIntoThemeList(ALL_FEATURES)).toBe(true);
     expect(injected()).toHaveLength(3);
   });
 
   it('adds a selection checkbox for each library theme, but not the live theme', () => {
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expect(checkboxes()).toHaveLength(2);
     expect(checkboxes().every((checkbox) => checkbox.tagName === 'S-CHECKBOX')).toBe(true);
@@ -245,7 +246,7 @@ describe('injectIntoThemeList', () => {
     list.insertAdjacentHTML('beforeend', themeItem('177000000001', escaped, 'editor'));
     const item = list.lastElementChild!;
 
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     const checkbox = item.querySelector('[data-alfred-theme-checkbox]')!;
     expect(checkbox.getAttribute('accessibilitylabel')).toBe(`Select ${name} for bulk delete`);
@@ -254,7 +255,7 @@ describe('injectIntoThemeList', () => {
   });
 
   it("puts each checkbox before the theme's thumbnail, outside its grid", () => {
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     for (const checkbox of checkboxes()) {
       const grid = checkbox.nextElementSibling!;
@@ -264,7 +265,7 @@ describe('injectIntoThemeList', () => {
   });
 
   it('puts the toolbar right after Select all: Delete, then an icon-only button that clears the selection', () => {
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expectBesideHeading();
     const buttons = [...toolbar()!.querySelectorAll('s-internal-button')];
@@ -279,18 +280,35 @@ describe('injectIntoThemeList', () => {
   });
 
   it('puts Select all right after the theme library heading, shown with nothing selected', () => {
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expect(selectAll()?.previousElementSibling?.tagName).toBe('S-INTERNAL-HEADING');
     expect(selectAll()?.textContent).toBe('Select all');
     expect(selectAll()?.hasAttribute('disabled')).toBe(false);
   });
 
+  it('adds only the copy buttons when bulk delete is off', () => {
+    injectIntoThemeList({ copyRows: true, bulkDelete: false });
+
+    expect(injected()).toHaveLength(3);
+    expect(checkboxes()).toHaveLength(0);
+    expect(selectAll()).toBeNull();
+    expect(toolbar()).toBeNull();
+  });
+
+  it('adds only the bulk delete controls when the copy buttons are off', () => {
+    injectIntoThemeList({ copyRows: false, bulkDelete: true });
+
+    expect(injected()).toHaveLength(0);
+    expect(checkboxes()).toHaveLength(2);
+    expectBesideHeading();
+  });
+
   it('finds the header by its New button when the group label is translated', () => {
     const group = document.querySelector('[role="group"]')!;
     group.setAttribute('aria-label', 'Acciones de tema');
     try {
-      injectIntoThemeList();
+      injectIntoThemeList(ALL_FEATURES);
       expectBesideHeading();
     } finally {
       group.setAttribute('aria-label', 'Theme actions');
@@ -308,7 +326,7 @@ describe('injectIntoThemeList', () => {
         </s-internal-button>
       </div></div>`;
     try {
-      injectIntoThemeList();
+      injectIntoThemeList(ALL_FEATURES);
       expectBesideHeading();
     } finally {
       row.innerHTML = original;
@@ -370,7 +388,7 @@ describe('bulk delete', () => {
     confirmMessage = '';
     deleteRequests.length = 0;
     respondToDelete = () => Promise.resolve({ ok: true });
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
   });
 
   it('shows the toolbar only while themes are checked, with an accurate count', () => {
@@ -419,7 +437,7 @@ describe('bulk delete', () => {
     expectIdle(2);
 
     list().append(gamma); // "Show all"
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
     expectIdle(2);
 
     click(button('select-all'));
@@ -453,7 +471,7 @@ describe('bulk delete', () => {
     select('Beta');
     checkboxOf('Beta').remove();
 
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expect(checkedNames()).toEqual(['Beta']);
     expectIdle(1);
@@ -463,7 +481,7 @@ describe('bulk delete', () => {
     select('Alpha', 'Beta');
     card('Alpha')!.remove(); // e.g. deleted from Shopify's own menu
 
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expectIdle(1);
   });
@@ -477,8 +495,8 @@ describe('bulk delete', () => {
     const observer = new dom.MutationObserver((batch: unknown[]) => records.push(...batch));
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
 
-    injectIntoThemeList();
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
+    injectIntoThemeList(ALL_FEATURES);
     await tick();
 
     observer.disconnect();
@@ -565,7 +583,7 @@ describe('bulk delete', () => {
     // A 9 where idOf has a 0 keeps these IDs clear of the NAMES themes'.
     const extra = ['Delta', 'Epsilon'].map((name, i) => themeItem(`${round}9${i}`, name, 'editor'));
     list().insertAdjacentHTML('beforeend', extra.join(''));
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
     click(button('select-all'));
     respondToDelete = () => Promise.reject(new Error('Could not establish connection'));
 
@@ -611,7 +629,7 @@ describe('bulk delete', () => {
 
     // Shopify's list still has the theme until it reloads its data, so a re-render brings it back.
     card('Alpha')!.outerHTML = themeItem(idOf('Alpha'), 'Alpha', 'editor');
-    injectIntoThemeList();
+    injectIntoThemeList(ALL_FEATURES);
 
     expect(remaining()).toEqual(['Beta', 'Gamma']);
     click(button('select-all'));

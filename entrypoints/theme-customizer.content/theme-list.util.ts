@@ -110,29 +110,41 @@ const injectCopyRows = (themes: ThemeElements[]): boolean => {
   return injected;
 };
 
+/** The theme list features the user has turned on in Options. */
+interface ThemeListFeatures {
+  copyRows: boolean;
+  bulkDelete: boolean;
+}
+
 /**
  * Adds the copy buttons for the live theme and each theme in the library, and the bulk-delete
- * controls (see {@link injectBulkDelete}). Themes whose injections React has re-rendered away get
- * them back on the next scan.
+ * controls (see {@link injectBulkDelete}), each only when turned on. Themes whose injections React
+ * has re-rendered away get them back on the next scan.
+ * @param features - Which features to add.
  * @returns `true` if at least one theme was newly injected into.
  */
-export const injectIntoThemeList = () => {
+export const injectIntoThemeList = ({ copyRows, bulkDelete }: ThemeListFeatures) => {
   const themes = collectThemeElements();
 
-  const copyRowsInjected = injectCopyRows(themes);
-  const checkboxesInjected = injectBulkDelete(themes);
+  const copyRowsInjected = copyRows && injectCopyRows(themes);
+  const checkboxesInjected = bulkDelete && injectBulkDelete(themes);
 
   return copyRowsInjected || checkboxesInjected;
 };
 
 /**
- * Adds the theme list buttons while the frame is on /themes, on first load and after
- * client-side navigation. A MutationObserver covers the list rendering after the URL changes.
+ * Adds the theme list features turned on in Options while the frame is on /themes, on first load
+ * and after client-side navigation. A MutationObserver covers the list rendering after the URL
+ * changes.
  * @param ctx - The content script context, used to watch URL changes and clean up.
  */
 export const setupThemeList = async (ctx: ContentScriptContext) => {
   const settings = await getSettings();
-  if (!isEnabled(settings.admin.themeListUtils)) {
+  const features: ThemeListFeatures = {
+    copyRows: isEnabled(settings.admin.themeListUtils),
+    bulkDelete: isEnabled(settings.admin.themeListBulkDelete)
+  };
+  if (!features.copyRows && !features.bulkDelete) {
     return;
   }
 
@@ -155,14 +167,14 @@ export const setupThemeList = async (ctx: ContentScriptContext) => {
       return;
     }
 
-    injectIntoThemeList();
+    injectIntoThemeList(features);
 
     let queued = false;
     observer = new MutationObserver(() => {
       if (queued) return;
       queued = true;
       requestAnimationFrame(() => {
-        injectIntoThemeList();
+        injectIntoThemeList(features);
         queued = false;
       });
     });
