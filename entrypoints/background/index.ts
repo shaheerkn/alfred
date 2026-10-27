@@ -147,8 +147,14 @@ export default defineBackground(() => {
     }
 
     // The theme list's iframe can't send the admin's authenticated request itself, so the
-    // admin page in the same tab does it (shopify-admin.content/theme-delete.ts).
-    if (message.type === 'delete_theme' && sender.tab?.id !== undefined && /^\d+$/.test(message.themeId)) {
+    // admin page in the same tab does it (shopify-admin.content/theme-delete.ts). Only that iframe
+    // may ask: Alfred's content scripts also run in admin's other frames, such as third-party apps'.
+    if (
+      message.type === 'delete_theme' &&
+      sender.tab?.id !== undefined &&
+      sender.url?.startsWith('https://online-store-web.shopifyapps.com/') &&
+      /^\d+$/.test(message.themeId)
+    ) {
       const tabMessage: TabMessage = { action: 'delete_theme', themeId: message.themeId };
       browser.tabs.sendMessage(sender.tab.id, tabMessage, { frameId: 0 }).then(sendResponse, () =>
         sendResponse({
