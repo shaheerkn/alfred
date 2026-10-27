@@ -7,6 +7,8 @@
 You can now delete themes in bulk. Each theme in your library on the Themes page has a checkbox, so you can pick a few or select them all at once. Your live theme always stays untouched.
 
 
+<video controls autoplay loop muted playsinline src="https://bucket.alfred.uptek.com/alfred-theme-bulk-delete.mp4"></video>
+
 ## 2026.10.18
 @ 2026-10-18
 
