@@ -1,5 +1,4 @@
 import { sendTrackEvent } from '~/utils/analytics';
-import type { AnalyticsAction } from '~/utils/analytics-actions';
 import { Toast } from '~/utils/toast';
 import { sendRuntimeMessage, type ThemeDeleteResponse } from '~/utils/messages';
 import { collectThemeElements, html, THEMES_PATH, type ThemeElements } from './theme-list-scan.util';
@@ -561,7 +560,7 @@ const confirmAndDeleteSelected = async () => {
   }
 
   if (result.deleted.length > 0) {
-    sendTrackEvent('admin.theme_list.theme_remove' as AnalyticsAction, { count: result.deleted.length });
+    sendTrackEvent('admin.theme_list.theme_remove', { count: result.deleted.length });
   }
 
   Toast.show(summarizeBulkDelete(result), result.failed.length > 0 ? 'error' : 'success', 6000);
