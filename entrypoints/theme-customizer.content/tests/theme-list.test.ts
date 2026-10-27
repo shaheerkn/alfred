@@ -544,6 +544,37 @@ describe('bulk delete', () => {
     expect(toastTexts().at(-1)).toBe("Deleted 0 themes, couldn't delete Beta (Could not establish connection).");
   });
 
+  it('names each failure reason once, after the themes it applies to', async () => {
+    select('Alpha', 'Beta', 'Gamma');
+    respondToDelete = (themeId) =>
+      themeId === idOf('Beta')
+        ? Promise.reject(new Error('Could not establish connection'))
+        : Promise.resolve({ ok: false, error: 'Theme is processing' });
+
+    click(button('delete'));
+    await waitUntil(() => toastTexts().at(-1)?.includes('Gamma') ?? false);
+
+    expect(toastTexts().at(-1)).toBe(
+      "Deleted 0 themes, couldn't delete Alpha and Gamma (Theme is processing); Beta (Could not establish connection)."
+    );
+  });
+
+  it('names at most three themes per failure reason, counting the rest', async () => {
+    // A 9 where idOf has a 0 keeps these IDs clear of the NAMES themes'.
+    const extra = ['Delta', 'Epsilon'].map((name, i) => themeItem(`${round}9${i}`, name, 'editor'));
+    list().insertAdjacentHTML('beforeend', extra.join(''));
+    injectIntoThemeList();
+    click(button('select-all'));
+    respondToDelete = () => Promise.reject(new Error('Could not establish connection'));
+
+    click(button('delete'));
+    await waitUntil(() => /Epsilon|more/.test(toastTexts().at(-1) ?? ''));
+
+    expect(toastTexts().at(-1)).toBe(
+      "Deleted 0 themes, couldn't delete Alpha, Beta, Gamma and 2 more (Could not establish connection)."
+    );
+  });
+
   it('shows progress and ignores checkbox changes and clearing while a delete is running', async () => {
     select('Alpha', 'Beta');
     let finish = () => {};

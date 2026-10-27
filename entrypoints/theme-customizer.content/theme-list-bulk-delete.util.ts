@@ -482,14 +482,33 @@ const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<
   return result;
 };
 
+/** Joins names as "A, B and C", without a serial comma. */
+const listFormat = new Intl.ListFormat('en-GB');
+
+/** The most theme names the summary gives per failure reason before counting the rest. */
+const SUMMARY_NAME_LIMIT = 3;
+
 /**
- * Sums up a bulk delete for the toast, e.g. "Deleted 3 themes, couldn't delete Horizon (reason)."
+ * Sums up a bulk delete for the toast, e.g. "Deleted 3 themes, couldn't delete Horizon and Dawn
+ * (reason)." Each reason is named once, after the themes it applies to, and only the first few
+ * of those are named, so a failure that hits every theme stays one short line.
  * @param result - What {@link deleteThemes} returned.
  */
 const summarizeBulkDelete = ({ deleted, failed }: BulkDeleteResult) => {
   const parts = [`Deleted ${themeCount(deleted.length)}`];
   if (failed.length > 0) {
-    parts.push(`couldn't delete ${failed.map((f) => `${f.name} (${f.reason})`).join(', ')}`);
+    const namesByReason = new Map<string, string[]>();
+    for (const { name, reason } of failed) {
+      namesByReason.set(reason, [...(namesByReason.get(reason) ?? []), name]);
+    }
+    const groups = [...namesByReason].map(([reason, names]) => {
+      const listed = names.slice(0, SUMMARY_NAME_LIMIT);
+      if (names.length > SUMMARY_NAME_LIMIT) {
+        listed.push(`${names.length - SUMMARY_NAME_LIMIT} more`);
+      }
+      return `${listFormat.format(listed)} (${reason})`;
+    });
+    parts.push(`couldn't delete ${groups.join('; ')}`);
   }
   return `${parts.join(', ')}.`;
 };
