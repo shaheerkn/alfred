@@ -1,14 +1,13 @@
 /** The themes page's path, where the theme list features run. */
 export const THEMES_PATH = /\/themes\/?$/;
 
-export interface ThemeData {
+interface ThemeData {
   themeId: string;
   previewUrl: string;
 }
 
 export interface ThemeElements extends ThemeData {
   name: string;
-  editLink: HTMLAnchorElement;
   actions: Element;
   more: HTMLButtonElement | null;
   card: HTMLElement;
@@ -76,7 +75,7 @@ export const collectThemeElements = (): ThemeElements[] => {
     const more = actions.querySelector<HTMLButtonElement>(':scope > button[command]');
     const name = card.querySelector('h3')?.textContent?.trim() ?? data.themeId;
 
-    themes.push({ ...data, name, editLink, actions, more, card, isPublished: !!publishedCard });
+    themes.push({ ...data, name, actions, more, card, isPublished: !!publishedCard });
   });
 
   return themes;

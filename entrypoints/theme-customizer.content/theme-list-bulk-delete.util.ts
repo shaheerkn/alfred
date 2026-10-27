@@ -71,9 +71,6 @@ const checkboxInput = (checkbox: Element): HTMLInputElement | null =>
  */
 const isCheckboxChecked = (checkbox: CheckboxElement) => checkboxInput(checkbox)?.checked ?? !!checkbox.checked;
 
-/** Set while {@link setCheckboxChecked} clicks a checkbox, so that click isn't taken as the user's. */
-let syncingCheckbox = false;
-
 /**
  * Checks or unchecks an `s-checkbox` from code. The checkmark is drawn from the component's own
  * state, not the inner input, so writing only the input changes nothing visible. The `checked`
@@ -88,17 +85,10 @@ const setCheckboxChecked = (checkbox: CheckboxElement, checked: boolean) => {
   if (checkbox.checked !== checked) {
     checkbox.checked = checked;
   }
-  if (checkbox.hasAttribute('checked') !== checked) {
-    checkbox.toggleAttribute('checked', checked);
-  }
+  checkbox.toggleAttribute('checked', checked);
   const input = checkboxInput(checkbox);
   if (input && input.checked !== checked) {
-    syncingCheckbox = true;
-    try {
-      input.click();
-    } finally {
-      syncingCheckbox = false;
-    }
+    input.click();
   }
 };
 
@@ -153,15 +143,12 @@ const eligibleThemeIds = (themes = collectThemeElements()) =>
 
 /**
  * Brings every checkbox in line with `selectedThemeIds`, and disables them while a bulk delete
- * runs so the selection can't change under it. Only writes what differs, for the same reason as
- * {@link setText}.
+ * runs so the selection can't change under it.
  */
 const syncCheckboxes = () => {
   document.querySelectorAll<CheckboxElement>(`[${CHECKBOX_ATTR}]`).forEach((checkbox) => {
     // Enabled first: setCheckboxChecked may click it, and a disabled input ignores clicks.
-    if (checkbox.hasAttribute('disabled') !== !!progress) {
-      checkbox.toggleAttribute('disabled', !!progress);
-    }
+    checkbox.toggleAttribute('disabled', !!progress);
     setCheckboxChecked(checkbox, selectedThemeIds.has(checkbox.dataset.themeId ?? ''));
   });
 };
@@ -194,8 +181,7 @@ const fillFixedWidthButtons = () => {
 /**
  * Refreshes the "Select all" button beside the theme library heading. Always shown, so a
  * selection can start from it; it reads "Deselect all" once every theme is selected, and is
- * disabled while a delete runs or when there are no themes to select. Only writes what differs,
- * like the toolbar.
+ * disabled while a delete runs or when there are no themes to select.
  * @param themes - Themes found on the current render pass; omit to scan the page.
  */
 const updateSelectAll = (themes?: ThemeElements[]) => {
@@ -206,10 +192,7 @@ const updateSelectAll = (themes?: ThemeElements[]) => {
   const eligible = eligibleThemeIds(themes);
   const allSelected = eligible.length > 0 && eligible.every((id) => selectedThemeIds.has(id));
   setText(button, allSelected ? 'Deselect all' : 'Select all');
-  const disabled = !!progress || eligible.length === 0;
-  if (button.hasAttribute('disabled') !== disabled) {
-    button.toggleAttribute('disabled', disabled);
-  }
+  button.toggleAttribute('disabled', !!progress || eligible.length === 0);
 };
 
 /**
@@ -236,9 +219,7 @@ const updateToolbar = (themes?: ThemeElements[]) => {
     progress ? `Deleting ${progress.current} of ${progress.total}…` : `Delete ${themeCount(count)}`
   );
   for (const button of toolbar.querySelectorAll('[data-action]')) {
-    if (button.hasAttribute('disabled') !== !!progress) {
-      button.toggleAttribute('disabled', !!progress);
-    }
+    button.toggleAttribute('disabled', !!progress);
   }
 };
 
@@ -248,8 +229,8 @@ const updateToolbar = (themes?: ThemeElements[]) => {
  * @param checked - The checkbox's new state.
  */
 const handleCheckboxChange = (themeId: string, checked: boolean) => {
-  if (syncingCheckbox) {
-    return; // Alfred's own click, already matching the selection
+  if (checked === selectedThemeIds.has(themeId)) {
+    return; // already matches, as after Alfred's own sync click
   }
   if (progress) {
     updateToolbar(); // puts the checkbox back; the selection is fixed while a delete runs
@@ -267,13 +248,8 @@ const handleCheckboxChange = (themeId: string, checked: boolean) => {
  * Adds a selection checkbox before each library theme's thumbnail, skipping the live theme (Shopify
  * doesn't allow deleting the published theme). Checked state comes from `selectedThemeIds` via
  * {@link syncCheckboxes}, so it survives React re-rendering the row away and Alfred re-adding it.
- *
- * Uses the page's own `s-checkbox` element (Shopify's Polaris web component, also documented
- * publicly at shopify.dev/docs/api/checkout-ui-extensions/.../forms/checkbox) rather than a
- * hand-styled `<input>`, so it matches Shopify's own checkbox design for free. `accessibilitylabel`
- * (not `label`) gives it a screen-reader-only label, since the theme's name is already visible
- * in the same row. State goes through its real inner `<input>` (see {@link checkboxInput}), and
- * only after it's inserted into the document, since that's when its shadow root attaches.
+ * Uses the page's own Polaris `s-checkbox`, so it matches Shopify's design; `accessibilitylabel`
+ * (not `label`) keeps its label screen-reader-only, since the theme's name is already in the row.
  * @param themes - Themes found on the current render pass.
  * @returns `true` if at least one theme got a new checkbox.
  */
@@ -304,9 +280,6 @@ const injectCheckboxes = (themes: ThemeElements[]): boolean => {
     injected = true;
   }
 
-  if (injected) {
-    syncCheckboxes();
-  }
   return injected;
 };
 
@@ -383,16 +356,10 @@ const findThemeActions = () => {
  * left of the header and Shopify's on the right. Delete comes first, then an icon-only button
  * that clears the selection. Its state lives in module variables, so a re-added toolbar picks
  * up where the old one left off, even mid-delete.
- * @param themes - Themes found on the current render pass.
  */
-const injectBulkToolbar = (themes: ThemeElements[]) => {
-  if (document.querySelector(`[${TOOLBAR_ATTR}]`)) {
-    updateToolbar(themes);
-    return;
-  }
-
+const injectBulkToolbar = () => {
   const selectAll = document.querySelector(`[${SELECT_ALL_ATTR}]`);
-  if (!selectAll) {
+  if (document.querySelector(`[${TOOLBAR_ATTR}]`) || !selectAll) {
     return;
   }
 
@@ -406,25 +373,21 @@ const injectBulkToolbar = (themes: ThemeElements[]) => {
   toolbar.querySelector('[data-action="clear"]')?.addEventListener('click', clearSelection);
 
   selectAll.after(toolbar);
-  updateToolbar(themes);
 };
 
 /**
  * Adds "Select all" right after the theme library's heading ("Draft themes"), if it isn't there
  * already. The heading is the one in the same header as Import, found by walking up from its
  * button row.
- * @param themes - Themes found on the current render pass.
  */
-const injectSelectAll = (themes: ThemeElements[]) => {
+const injectSelectAll = () => {
   if (document.querySelector(`[${SELECT_ALL_ATTR}]`)) {
     return;
   }
 
-  let header = findThemeActions()?.parentElement ?? null;
-  while (header && !header.querySelector('s-internal-heading')) {
-    header = header.parentElement;
-  }
-  const heading = header?.querySelector('s-internal-heading');
+  const heading = findThemeActions()
+    ?.parentElement?.closest(':has(s-internal-heading)')
+    ?.querySelector('s-internal-heading');
   if (!heading || !document.querySelector('ul[class*="ThemeList"]')) {
     return;
   }
@@ -434,7 +397,6 @@ const injectSelectAll = (themes: ThemeElements[]) => {
   );
   button.addEventListener('click', handleSelectAllClick);
   heading.after(button);
-  updateSelectAll(themes);
 };
 
 /**
@@ -454,8 +416,8 @@ const deleteOneTheme = async (themeId: string): Promise<ThemeDeleteResponse> => 
 };
 
 interface BulkDeleteResult {
-  deleted: string[];
-  failed: { id: string; name: string; reason: string }[];
+  deleted: number;
+  failed: { name: string; reason: string }[];
 }
 
 /**
@@ -466,7 +428,7 @@ interface BulkDeleteResult {
  * @param names - Theme names by ID, for the summary.
  */
 const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<BulkDeleteResult> => {
-  const result: BulkDeleteResult = { deleted: [], failed: [] };
+  const result: BulkDeleteResult = { deleted: 0, failed: [] };
 
   for (const [index, id] of ids.entries()) {
     progress = { current: index + 1, total: ids.length };
@@ -474,14 +436,14 @@ const deleteThemes = async (ids: string[], names: Map<string, string>): Promise<
 
     const response = await deleteOneTheme(id);
     if (response.ok) {
-      result.deleted.push(id);
+      result.deleted++;
       selectedThemeIds.delete(id);
       deletedThemeIds.add(id);
       hideDeletedThemes();
     } else {
       const name = names.get(id) ?? id;
       console.warn(`Alfred: couldn't bulk-delete theme "${name}" (${id}): ${response.error}`);
-      result.failed.push({ id, name, reason: response.error });
+      result.failed.push({ name, reason: response.error });
     }
   }
 
@@ -501,16 +463,12 @@ const SUMMARY_NAME_LIMIT = 3;
  * @param result - What {@link deleteThemes} returned.
  */
 const summarizeBulkDelete = ({ deleted, failed }: BulkDeleteResult) => {
-  const parts = [`Deleted ${themeCount(deleted.length)}`];
+  const parts = [`Deleted ${themeCount(deleted)}`];
   if (failed.length > 0) {
-    const namesByReason = new Map<string, string[]>();
-    for (const { name, reason } of failed) {
-      namesByReason.set(reason, [...(namesByReason.get(reason) ?? []), name]);
-    }
-    const groups = [...namesByReason].map(([reason, names]) => {
-      const listed = names.slice(0, SUMMARY_NAME_LIMIT);
-      if (names.length > SUMMARY_NAME_LIMIT) {
-        listed.push(`${names.length - SUMMARY_NAME_LIMIT} more`);
+    const groups = [...Map.groupBy(failed, (f) => f.reason)].map(([reason, group]) => {
+      const listed = group.slice(0, SUMMARY_NAME_LIMIT).map((f) => f.name);
+      if (group.length > SUMMARY_NAME_LIMIT) {
+        listed.push(`${group.length - SUMMARY_NAME_LIMIT} more`);
       }
       return `${listFormat.format(listed)} (${reason})`;
     });
@@ -535,23 +493,20 @@ const confirmAndDeleteSelected = async () => {
   }
 
   const names = new Map(collectThemeElements().map((theme) => [theme.themeId, theme.name]));
-  const [only, ...others] = ids.map((id) => names.get(id) ?? id);
-  const listed = ids.slice(0, CONFIRM_NAME_LIMIT).map((id) => `• ${names.get(id) ?? id}`);
+  const labels = ids.map((id) => names.get(id) ?? id);
+  const listed = labels.slice(0, CONFIRM_NAME_LIMIT).map((label) => `• ${label}`);
   if (ids.length > CONFIRM_NAME_LIMIT) {
     listed.push(`…and ${ids.length - CONFIRM_NAME_LIMIT} more`);
   }
   // Worded like Shopify's own confirmation for deleting one theme.
   const question = 'Do you still want to continue?';
   const message =
-    others.length === 0
-      ? `Once deleted, ${only} cannot be recovered. ${question}`
+    ids.length === 1
+      ? `Once deleted, ${labels[0]} cannot be recovered. ${question}`
       : `Once deleted, these ${themeCount(ids.length)} cannot be recovered:\n\n${listed.join('\n')}\n\n${question}`;
   if (!confirm(message)) {
     return;
   }
-
-  progress = { current: 0, total: ids.length };
-  updateToolbar();
 
   let result: BulkDeleteResult;
   try {
@@ -566,8 +521,8 @@ const confirmAndDeleteSelected = async () => {
     }
   }
 
-  if (result.deleted.length > 0) {
-    sendTrackEvent('admin.theme_list.theme_remove', { count: result.deleted.length });
+  if (result.deleted > 0) {
+    sendTrackEvent('admin.theme_list.theme_remove', { count: result.deleted });
   }
 
   Toast.show(summarizeBulkDelete(result), result.failed.length > 0 ? 'error' : 'success', 6000);
@@ -584,8 +539,9 @@ export const injectBulkDelete = (themes: ThemeElements[]): boolean => {
   const injected = injectCheckboxes(themes);
   hideDeletedThemes(themes);
   pruneSelection(themes);
-  injectSelectAll(themes);
-  injectBulkToolbar(themes);
+  injectSelectAll();
+  injectBulkToolbar();
+  updateToolbar(themes);
   return injected;
 };
 
